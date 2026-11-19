@@ -32,7 +32,8 @@
     "prepack": "yarn build"
   },
   "dependencies": {
-    "@ai-sdk/provider": "^4.0.31"
+    "@ai-sdk/provider": "^4.0.31",
+    "@magichourhq/browser-client": "^0.3.0"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
