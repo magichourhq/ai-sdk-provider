@@ -289,6 +289,7 @@ __metadata:
   resolution: "@magichourhq/ai-sdk-provider@workspace:."
   dependencies:
     "@ai-sdk/provider": "npm:^4.0.31"
+    "@magichourhq/browser-client": "npm:^0.3.0"
     "@types/node": "npm:^24.0.0"
     ai: "npm:^7.0.148"
     tsx: "npm:^4.20.0"
@@ -300,6 +301,22 @@ __metadata:
     ai: ^7.0.148
   languageName: unknown
   linkType: soft
+
+"@magichourhq/api-types@npm:0.1.1":
+  version: 0.1.1
+  resolution: "@magichourhq/api-types@npm:0.1.1"
+  checksum: 10/6bff6936b8d30165d8ad469b657096f1bc0d535d99bf6d4b06d120ad1af1abad4993ca142c26284fe205d575ea0c0f24630829d8b9583421e452a09696ad82d5
+  languageName: node
+  linkType: hard
+
+"@magichourhq/browser-client@npm:^0.3.0":
+  version: 0.3.0
+  resolution: "@magichourhq/browser-client@npm:0.3.0"
+  dependencies:
+    "@magichourhq/api-types": "npm:0.1.1"
+  checksum: 10/00849982bccf295cc81ee3e5826ec0d9d97a086d0b56322193c7e2678a1f3635079da4e685a48dcbe2a17fde35ea61ddcdfc680ad310991d7637af1ddf083f91
+  languageName: node
+  linkType: hard
 
 "@napi-rs/wasm-runtime@npm:1.2.6":
   version: 1.2.6
