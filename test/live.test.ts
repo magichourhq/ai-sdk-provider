@@ -4,7 +4,7 @@ import { generateImage } from "ai";
 import { describe, expect, test } from "vitest";
 import { createMagicHour, MagicHourError } from "../src/index.js";
 
-describe.skipIf(!process.env.MAGIC_HOUR_LIVE)("live Magic Hour API", () => {
+describe.skipIf(process.env.MAGIC_HOUR_LIVE !== "1")("live Magic Hour API", () => {
   test("generates a 640px image through the AI SDK", { timeout: 300_000 }, async () => {
     const result = await generateImage({
       model: createMagicHour().image("flux-2-klein"),
@@ -21,7 +21,7 @@ describe.skipIf(!process.env.MAGIC_HOUR_LIVE)("live Magic Hour API", () => {
     expect(image.creditsCharged).toBeGreaterThan(0);
   });
 
-  test("an invalid key is rejected with HTTP 401 and no retry", async () => {
+  test("an invalid key is rejected with HTTP 401", async () => {
     const error = await generateImage({
       model: createMagicHour({ apiKey: "invalid-key" }).image(),
       prompt: "A small red apple",

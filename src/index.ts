@@ -44,6 +44,12 @@ function extra(options: ImageModelV4CallOptions | VideoModelV4CallOptions, allow
     if (!allowed.includes(key)) throw new Error(`Unsupported Magic Hour option: ${key}.`);
   return values;
 }
+/** Parses "WIDTHxHEIGHT" with positive whole numbers. */
+function dimensions(value: string): [width: number, height: number] {
+  const match = /^([1-9]\d*)x([1-9]\d*)$/.exec(value);
+  if (!match) throw new Error("Dimensions must look like 1024x1024.");
+  return [Number(match[1]), Number(match[2])];
+}
 function imageResolution(size: string | undefined, option: unknown): ImageResolution {
   if (option !== undefined && !isOneOf(imageResolutions, option))
     throw new Error("Image resolution must be 640px, 1k, or 2k.");
@@ -51,8 +57,7 @@ function imageResolution(size: string | undefined, option: unknown): ImageResolu
   if (option !== undefined)
     throw new Error("Use either size or providerOptions.magichour.resolution.");
   // Magic Hour exposes longest-edge tiers, rather than arbitrary pixel sizes.
-  const [width, height] = size.split("x").map(Number);
-  const edge = Math.max(width, height);
+  const edge = Math.max(...dimensions(size));
   const tier = new Map<number, ImageResolution>([
     [640, "640px"],
     [1024, "1k"],
@@ -66,8 +71,7 @@ function imageResolution(size: string | undefined, option: unknown): ImageResolu
 }
 function ratioFromSize(size: string | undefined): AspectRatio | undefined {
   if (!size) return undefined;
-  const [w, h] = size.split("x").map(Number);
-  if (w <= 0 || h <= 0) throw new Error("Invalid dimensions.");
+  const [w, h] = dimensions(size);
   for (const r of aspectRatios) {
     const [rw, rh] = r.split(":").map(Number);
     if (Math.abs(w / h - rw / rh) < 0.002) return r;
@@ -167,7 +171,7 @@ export function createMagicHour(settings: MagicHourSettings = {}): MagicHourProv
         let resolution: VideoResolution = extras.resolution ?? "480p";
         const dimensionsRatio = ratioFromSize(options.resolution);
         if (options.resolution) {
-          const shortEdge = Math.min(...options.resolution.split("x").map(Number));
+          const shortEdge = Math.min(...dimensions(options.resolution));
           const mapped = new Map<number, VideoResolution>([
             [360, "360p"],
             [480, "480p"],

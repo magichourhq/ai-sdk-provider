@@ -1,13 +1,14 @@
 import { createProviderRegistry, generateImage } from "ai";
 import { describe, expect, test } from "vitest";
-import { fakeApi, png, STORAGE } from "./fake-api.js";
+import { API, fakeApi, png } from "./fake-api.js";
 
 describe("image request", () => {
   test("defaults to the default model, one 640px image and no aspect ratio", async () => {
     const api = fakeApi({ statuses: ["complete"] });
     await generateImage({ model: api.provider().image(), prompt: "A mug", maxRetries: 0 });
     expect(api.generations()).toHaveLength(1);
-    expect(api.generations()[0].url).toBe("https://api.magichour.ai/v1/ai-image-generator");
+    expect(api.generations()[0].url).toBe(`${API}/v1/ai-image-generator`);
+    expect(api.generations()[0].headers.get("Content-Type")).toMatch(/^application\/json/);
     expect(api.generations()[0].body).toEqual({
       model: "default",
       image_count: 1,
@@ -99,6 +100,8 @@ describe("image validation happens before any request", () => {
     ["a seed", { seed: 1 }],
     ["a size that isn't a 640, 1024 or 2048 tier", { size: "500x500" }],
     ["a size with an unsupported aspect ratio", { size: "1024x768" }],
+    ["a size with trailing text", { size: "1024x1024xjunk" }],
+    ["a size with a non-numeric dimension", { size: "1024xabc" }],
     ["a zero dimension", { size: "0x1024" }],
     ["an unsupported aspect ratio", { aspectRatio: "4:3" }],
     ["a size and aspect ratio that disagree", { size: "1024x1024", aspectRatio: "16:9" }],
@@ -139,9 +142,8 @@ describe("image validation happens before any request", () => {
 
   test("rejects more than one image per call when called directly", async () => {
     const api = fakeApi();
-    const model = api.provider().image();
     await expect(
-      model.doGenerate({
+      api.provider().image().doGenerate({
         prompt: "Mug",
         n: 2,
         size: undefined,
@@ -157,37 +159,39 @@ describe("image validation happens before any request", () => {
 });
 
 describe("image result", () => {
-  test("returns the downloaded bytes with project metadata", async () => {
+  test("returns the project's own output with its metadata", async () => {
     const api = fakeApi({ creditsCharged: 7 });
     const result = await generateImage({
       model: api.provider().image("flux-2-klein"),
       prompt: "Mug",
       maxRetries: 0,
     });
-    expect(result.image.uint8Array).toEqual(png);
+    const [project] = api.projects();
+    expect(result.image.uint8Array).toEqual(project.bytes);
     expect(result.image.mediaType).toBe("image/png");
     expect(result.warnings).toEqual([]);
     expect(result.responses[0].modelId).toBe("flux-2-klein");
     expect(result.providerMetadata.magichour.images).toEqual([
-      { projectId: "project-1", creditsCharged: 7 },
+      { projectId: project.id, creditsCharged: 7 },
     ]);
   });
 
-  test("polls the image project until it completes, then downloads once", async () => {
+  test("polls the accepted image project until it completes, then downloads its signed URL", async () => {
     const api = fakeApi({ statuses: ["draft", "queued", "rendering", "complete"] });
     await generateImage({ model: api.provider().image(), prompt: "Mug", maxRetries: 0 });
-    expect(api.polls().map((c) => c.url)).toEqual(
-      Array(4).fill("https://api.magichour.ai/v1/image-projects/project-1")
+    const [project] = api.projects();
+    expect(api.polls().map((c) => `${c.method} ${c.url}`)).toEqual(
+      Array(4).fill(`GET ${API}/v1/image-projects/${project.id}`)
     );
-    expect(api.storage().map((c) => `${c.method} ${c.url}`)).toEqual([`GET ${STORAGE}/output.png`]);
+    expect(api.storage().map((c) => `${c.method} ${c.url}`)).toEqual([`GET ${project.url}`]);
   });
 
   test("downloads only the first output when a project has several", async () => {
     const api = fakeApi({
       statuses: ["complete"],
-      downloads: [
-        { url: `${STORAGE}/first.png`, expires_at: "2099-01-01T00:00:00Z" },
-        { url: `${STORAGE}/second.png`, expires_at: "2099-01-01T00:00:00Z" },
+      downloads: (project) => [
+        { url: project.url, expires_at: "2099-01-01T00:00:00Z" },
+        { url: `${project.url}&second=1`, expires_at: "2099-01-01T00:00:00Z" },
       ],
     });
     const result = await generateImage({
@@ -196,24 +200,31 @@ describe("image result", () => {
       maxRetries: 0,
     });
     expect(result.images).toHaveLength(1);
-    expect(api.storage().map((c) => c.url)).toEqual([`${STORAGE}/first.png`]);
+    expect(api.storage().map((c) => c.url)).toEqual([api.projects()[0].url]);
   });
 
-  test("n images run as n single-image jobs and report every project", async () => {
-    const api = fakeApi({ statuses: ["complete"] });
+  test("n images run as n single-image jobs, each returning its own project's output", async () => {
+    const api = fakeApi({ statuses: ["rendering", "complete"] });
     const result = await generateImage({
       model: api.provider().image(),
       prompt: "Mug",
       n: 3,
       maxRetries: 0,
     });
-    expect(result.images).toHaveLength(3);
     expect(api.generations()).toHaveLength(3);
     for (const call of api.generations()) expect(call.body.image_count).toBe(1);
-    const projects = (result.providerMetadata.magichour.images as { projectId: string }[]).map(
-      (image) => image.projectId
+    const metadata = result.providerMetadata.magichour.images as { projectId: string }[];
+    expect(result.images).toHaveLength(3);
+    expect(metadata.map((m) => m.projectId).sort()).toEqual(
+      api
+        .projects()
+        .map((p) => p.id)
+        .sort()
     );
-    expect(projects.sort()).toEqual(["project-1", "project-2", "project-3"]);
+    result.images.forEach((image, i) => {
+      const project = api.projects().find((p) => p.id === metadata[i].projectId)!;
+      expect(image.uint8Array).toEqual(project.bytes);
+    });
   });
 
   test("works through an AI SDK provider registry", async () => {
