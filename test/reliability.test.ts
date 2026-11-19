@@ -104,7 +104,7 @@ async function underFakeTime(start: () => Promise<unknown>) {
 }
 
 describe("paid generations are never retried", () => {
-  const rejected = [400, 401, 402, 403, 404, 409, 422, 429];
+  const rejected = [400, 401, 402, 403, 404, 409, 422, 425, 429];
   const ambiguous = [408, 500, 502, 503, 504];
 
   for (const [endpoint, run] of endpoints) {
@@ -191,6 +191,14 @@ describe("failures after acceptance name the accepted project", () => {
     ],
     ["a failed poll", { projectStatus: 500 }],
     ["a missing project", { projectStatus: 404 }],
+    [
+      "a poll that returns HTML",
+      {
+        pollResponse: () =>
+          new Response("<html>Bad gateway</html>", { headers: { "Content-Type": "text/html" } }),
+      },
+    ],
+    ["a poll that returns null", { pollResponse: () => Response.json(null) }],
     ["a failed download", { statuses: ["complete"], downloadStatus: 403 }],
     ["a download with no content (204)", { statuses: ["complete"], downloadStatus: 204 }],
     ["an empty download (200)", { statuses: ["complete"], emptyDownload: true }],
@@ -300,6 +308,19 @@ describe("cancellation", () => {
     });
   }
 
+  test.each(endpoints)("%s: aborting right after acceptance names the project", async (_, run) => {
+    const controller = new AbortController();
+    const api = fakeApi();
+    const error = await rejection(
+      run(api, {
+        abortSignal: controller.signal,
+        settings: { onProjectCreated: () => controller.abort() },
+      })
+    );
+    expectRecoverable(error, onlyProject(api));
+    expect(api.generations()).toHaveLength(1);
+  });
+
   test("aborting an in-flight upload starts no paid job", async () => {
     const { api, signal } = abortWhenHeld((c) => c.method === "PUT");
     await expect(runImageVideo(api, { abortSignal: signal })).rejects.toThrow();
@@ -379,6 +400,16 @@ describe("timing", () => {
       expect(elapsed).toBeLessThan(1200);
     }
   );
+
+  test("without timeoutMs, a job that takes over a minute still succeeds", async () => {
+    // 14 polls 5 s apart finish after about 65 s, inside the 10-minute default deadline.
+    const api = fakeApi({ statuses: [...Array(13).fill("rendering"), "complete"] });
+    const { error, elapsed } = await underFakeTime(() =>
+      runImage(api, { settings: { pollIntervalMs: 5000 } })
+    );
+    expect(error).toBeUndefined();
+    expect(elapsed).toBeGreaterThan(60_000);
+  });
 
   test("timeoutMs also bounds a call whose caller passes its own signal", async () => {
     const api = fakeApi({ statuses: ["rendering"] });
@@ -545,6 +576,45 @@ describe("credentials and error contents", () => {
     }
   );
 
+  test.each<[string, FakeApiOptions]>([
+    ["an error project", { statuses: ["error"] }],
+    ["a failed poll", { projectStatus: 500 }],
+    ["a failed download", { statuses: ["complete"], downloadStatus: 403 }],
+    ["a failed upload", { uploadStatus: 403 }],
+    ["a failed upload-URL request", { uploadUrlsStatus: 500 }],
+  ])("the key stays on the API after %s", async (_, options) => {
+    const api = fakeApi(options);
+    await rejection(runImageVideo(api, { settings: { apiKey: key } }));
+    for (const call of api.offOrigin()) {
+      expect(call.headers.has("Authorization")).toBe(false);
+      expect(call.url).not.toContain(key);
+      for (const [, value] of call.headers) expect(value).not.toContain(key);
+    }
+  });
+
+  test("two providers with different keys running at once each use their own key", async () => {
+    const api = fakeApi({ statuses: ["queued", "rendering", "rendering", "complete"] });
+    const keys = ["key-tenant-a", "key-tenant-b"];
+    await Promise.all(
+      keys.map((apiKey, i) =>
+        generateImage({
+          model: api.provider({ apiKey }).image(),
+          prompt: `Tenant ${i}`,
+          maxRetries: 0,
+        })
+      )
+    );
+    expect(api.projects()).toHaveLength(2);
+    api.generations().forEach((call, i) => {
+      const keyUsed = call.headers.get("Authorization");
+      const tenant = Number(call.body.style.prompt.replace("Tenant ", ""));
+      expect(keyUsed).toBe(`Bearer ${keys[tenant]}`);
+      const project = api.projects()[i].id;
+      for (const poll of api.polls().filter((c) => c.url.endsWith(`/${project}`)))
+        expect(poll.headers.get("Authorization")).toBe(keyUsed);
+    });
+  });
+
   test.each(endpoints)(
     "%s: a caller's Authorization header can't replace the configured key",
     async (_, run) => {
@@ -577,7 +647,18 @@ describe("credentials and error contents", () => {
     ["a failed download", runImage, { statuses: ["complete"], downloadStatus: 403 }],
     ["a failed upload-URL request", runImageVideo, { uploadUrlsStatus: 500 }],
     ["a failed upload", runImageVideo, { uploadStatus: 403 }],
-  ])("%s never echoes the JSON error message", async (_, run, options) => {
+    ["an insufficient-credits rejection", runImage, { createStatus: 402 }],
+    [
+      "a malformed upload-URL response",
+      runImageVideo,
+      {
+        uploadUrlsResponse: () =>
+          new Response('{"items": [{"upload_url": "SECRET_123', {
+            headers: { "Content-Type": "application/json" },
+          }),
+      },
+    ],
+  ])("%s never echoes the response", async (_, run, options) => {
     const api = fakeApi({ ...options, errorMessage: secret });
     const error = await rejection(run(api, { maxRetries: 0 }));
     expect(String((error as Error).message)).not.toContain("SECRET_123");
@@ -588,6 +669,7 @@ describe("credentials and error contents", () => {
     ["the upload", (c) => c.method === "PUT"],
     ["the download", (c) => c.method === "GET" && c.url.startsWith(STORAGE)],
     ["a poll", (c) => /-projects\//.test(c.url)],
+    ["the paid submission", (c) => c.method === "POST" && /to-video$/.test(c.url)],
   ])("a fetch error on %s never echoes its message", async (_, match) => {
     const api = fakeApi({ statuses: ["complete"] });
     const fetch: typeof globalThis.fetch = async (input, init) => {
@@ -600,6 +682,27 @@ describe("credentials and error contents", () => {
     expect(error).toBeInstanceOf(Error);
     expect((error as Error).message).not.toContain(key);
     expect((error as Error).message).not.toContain("Signature");
+  });
+
+  test("an API key that isn't a valid header value never appears in the error", async () => {
+    const api = fakeApi();
+    const error = await rejection(runImage(api, { settings: { apiKey: "bad\nKEY_SECRET_9" } }));
+    expect((error as Error).message).not.toContain("KEY_SECRET_9");
+    expect(api.generations()).toHaveLength(0);
+  });
+
+  test("a caller's abort reason during an upload never appears in the error", async () => {
+    const controller = new AbortController();
+    const api = fakeApi({
+      hold: (c) => {
+        if (c.method !== "PUT") return false;
+        queueMicrotask(() => controller.abort(new Error("ABORT_REASON_SECRET")));
+        return true;
+      },
+    });
+    const error = await rejection(runImageVideo(api, { abortSignal: controller.signal }));
+    expect(String((error as Error)?.message)).not.toContain("ABORT_REASON_SECRET");
+    expect(api.generations()).toHaveLength(0);
   });
 
   test("the API key never appears in error messages", async () => {

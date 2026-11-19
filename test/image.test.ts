@@ -171,6 +171,7 @@ describe("image result", () => {
     expect(result.image.mediaType).toBe("image/png");
     expect(result.warnings).toEqual([]);
     expect(result.responses[0].modelId).toBe("flux-2-klein");
+    expect(result.responses[0].timestamp).toBeInstanceOf(Date);
     expect(result.providerMetadata.magichour.images).toEqual([
       { projectId: project.id, creditsCharged: 7 },
     ]);

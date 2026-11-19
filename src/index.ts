@@ -44,6 +44,12 @@ function extra(options: ImageModelV4CallOptions | VideoModelV4CallOptions, allow
     if (!allowed.includes(key)) throw new Error(`Unsupported Magic Hour option: ${key}.`);
   return values;
 }
+/** Decodes strict base64, which `Buffer.from` would otherwise accept with characters dropped. */
+function base64Bytes(value: string): Uint8Array {
+  if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value))
+    throw new Error("Image data must be base64.");
+  return new Uint8Array(Buffer.from(value, "base64"));
+}
 /** Parses "WIDTHxHEIGHT" with positive whole numbers. */
 function dimensions(value: string): [width: number, height: number] {
   const match = /^([1-9]\d*)x([1-9]\d*)$/.exec(value);
@@ -221,7 +227,7 @@ export function createMagicHour(settings: MagicHourSettings = {}): MagicHourProv
           if (!extension) throw new Error("Image-to-video accepts PNG, JPEG, or WebP.");
           const bytes =
             typeof options.image.data === "string"
-              ? new Uint8Array(Buffer.from(options.image.data, "base64"))
+              ? base64Bytes(options.image.data)
               : options.image.data;
           imagePath = await transport.uploadImage(bytes, extension, signal);
         }

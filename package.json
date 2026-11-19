@@ -28,7 +28,7 @@
     "build": "tsc -p tsconfig.json",
     "test": "vitest run",
     "test:live": "MAGIC_HOUR_LIVE=1 vitest run --coverage.enabled=false test/live.test.ts",
-    "smoke": "node --input-type=module -e \"const m = await import('@magichourhq/ai-sdk-provider'); for (const name of ['createMagicHour', 'magichour', 'MagicHourError']) if (!m[name]) throw new Error('missing export ' + name); console.log('package import ok');\"",
+    "smoke": "node scripts/smoke.mjs",
     "check": "tsc --noEmit -p tsconfig.test.json",
     "example": "tsx example.ts",
     "prepack": "yarn build"

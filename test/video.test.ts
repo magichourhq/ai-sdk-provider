@@ -1,8 +1,8 @@
 import { experimental_generateVideo as generateVideo } from "ai";
 import { describe, expect, test } from "vitest";
-import { API, fakeApi, png, STORAGE } from "./fake-api.js";
+import { API, fakeApi, jpeg, makePng, png, STORAGE, webp } from "./fake-api.js";
 
-const signedUpload = `${STORAGE}/uploads/input-1.png?X-Goog-Signature=upload-1`;
+const signedUpload = `${STORAGE}/uploads/input-1.png?X-Goog-Signature=sig%2Bup%2F1%26y%3D`;
 
 const base64Png = Buffer.from(png).toString("base64");
 
@@ -159,15 +159,56 @@ describe("image-to-video request", () => {
   });
 
   test.each([
-    ["image/png", "png"],
-    ["image/jpeg", "jpg"],
-    ["image/webp", "webp"],
-  ])("asks for a %s upload URL with the %s extension", async (mediaType, extension) => {
+    ["image/png", "png", png],
+    ["image/jpeg", "jpg", jpeg],
+    ["image/webp", "webp", webp],
+  ])("uploads a %s image with the %s extension", async (mediaType, extension, data) => {
     const api = fakeApi({ statuses: ["complete"] });
     await api.provider().video().doGenerate!(
-      videoCall({ image: { type: "file", mediaType, data: png } })
+      videoCall({ image: { type: "file", mediaType, data } })
     );
     expect(api.calls[0].body).toEqual({ items: [{ type: "image", extension }] });
+    expect(api.uploads()[0].bytes).toEqual(data);
+  });
+
+  test.each([true, false])("sends audio: %s for image-to-video", async (generateAudio) => {
+    const api = fakeApi({ statuses: ["complete"] });
+    await generateVideo({
+      model: api.provider().video(),
+      prompt: { image: png, text: "Animate" },
+      generateAudio,
+      maxRetries: 0,
+    });
+    expect(api.generations()[0].body.audio).toBe(generateAudio);
+  });
+
+  test("sends a signed input image URL exactly as given", async () => {
+    const api = fakeApi({ statuses: ["complete"] });
+    const url =
+      "https://cdn.example.com/in%20put.png?X-Amz-Signature=a%2Fb%2Bc%26d&X-Amz-Expires=60";
+    await generateVideo({
+      model: api.provider().video(),
+      prompt: { image: url, text: "Animate" },
+      maxRetries: 0,
+    });
+    expect(api.generations()[0].body.assets.image_file_path).toBe(url);
+  });
+
+  test("concurrent jobs each send the asset path of their own upload", async () => {
+    const api = fakeApi({ statuses: ["rendering", "complete"] });
+    const model = api.provider().video();
+    const images = [makePng(10, 20, 30), makePng(200, 100, 50)];
+    await Promise.all(
+      images.map((image, i) =>
+        generateVideo({ model, prompt: { image, text: `Job ${i}` }, maxRetries: 0 })
+      )
+    );
+    expect(api.generations()).toHaveLength(2);
+    for (const call of api.generations()) {
+      const upload = api.uploads().find((u) => u.filePath === call.body.assets.image_file_path)!;
+      const job = Number(call.body.style.prompt.replace("Job ", ""));
+      expect(upload.bytes).toEqual(images[job]);
+    }
   });
 
   test("each job uploads to its own signed URL and sends its own asset path", async () => {
@@ -260,6 +301,18 @@ describe("a failed upload never starts a paid job", () => {
     expect(api.generations()).toHaveLength(0);
   });
 
+  test("an upload that fails slowly still starts no paid job", async () => {
+    const api = fakeApi({ uploadStatus: 403, delay: (c) => (c.method === "PUT" ? 30 : 0) });
+    await expect(
+      generateVideo({
+        model: api.provider().video(),
+        prompt: { image: png, text: "Animate" },
+        maxRetries: 3,
+      })
+    ).rejects.toThrow();
+    expect(api.generations()).toHaveLength(0);
+  });
+
   test("an upload-URL request that fails", async () => {
     const api = fakeApi({ uploadUrlsStatus: 500 });
     await expect(
@@ -314,6 +367,8 @@ describe("a failed upload never starts a paid job", () => {
   test.each([
     ["empty bytes", new Uint8Array(0)],
     ["an empty base64 string", ""],
+    ["invalid base64", "iVBORw0KGgo!!"],
+    ["base64 missing a character", "iVBORw0KGgoAA"],
   ])("an input image with %s", async (_, data) => {
     const api = fakeApi();
     await expect(
@@ -357,6 +412,10 @@ describe("video validation happens before any request", () => {
       { prompt: { image: "https://example.com/i.png", text: "x" }, aspectRatio: "16:9" },
     ],
     ["a plain-HTTP image URL", { prompt: { image: "http://example.com/i.png", text: "x" } }],
+    [
+      "an image URL with embedded credentials",
+      { prompt: { image: "https://user:secret@example.com/i.png", text: "x" } },
+    ],
   ];
   test.each(cases)("rejects %s", async (_, options) => {
     const api = fakeApi();
@@ -424,13 +483,22 @@ describe("video validation happens before any request", () => {
 
 describe("video result", () => {
   test("returns the project's own MP4 with its metadata", async () => {
-    const api = fakeApi({ creditsCharged: 12 });
+    const api = fakeApi({
+      creditsCharged: 12,
+      // A second output must not change what's downloaded or the reported charge.
+      downloads: (p) => [
+        { url: p.url, expires_at: "2099-01-01T00:00:00Z" },
+        { url: `${p.url}&copy=2`, expires_at: "2099-01-01T00:00:00Z" },
+      ],
+    });
     const result = await generateVideo({
       model: api.provider().video("wan-2.2"),
       prompt: "Waves",
       maxRetries: 0,
     });
     const [project] = api.projects();
+    expect(api.storage().map((c) => c.url)).toEqual([project.url]);
+    expect(result.responses[0].timestamp).toBeInstanceOf(Date);
     expect(result.video.uint8Array).toEqual(project.bytes);
     expect(result.video.mediaType).toBe("video/mp4");
     expect(result.warnings).toEqual([]);

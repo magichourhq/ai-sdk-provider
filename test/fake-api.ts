@@ -37,6 +37,8 @@ export function makeMp4(marker: number): Uint8Array {
 }
 
 export const png = makePng(255, 0, 0);
+export const jpeg = new Uint8Array(readFileSync(new URL("./fixtures/tiny.jpg", import.meta.url)));
+export const webp = new Uint8Array(readFileSync(new URL("./fixtures/tiny.webp", import.meta.url)));
 
 export type Call = {
   url: string;
@@ -73,6 +75,8 @@ export type FakeApiOptions = {
   redirect?: (call: Call) => string | undefined;
   /** HTTP status for project polls. */
   projectStatus?: number;
+  /** Raw response for project polls, replacing the normal one. */
+  pollResponse?: () => Response | undefined;
   /** The `error` object on failed projects. */
   projectError?: { message: string; code: string };
   /** Overrides the downloads listed on a complete project. */
@@ -86,6 +90,8 @@ export type FakeApiOptions = {
   uploadUrlsStatus?: number;
   /** Response body for the upload-URL request. */
   uploadUrlsBody?: unknown;
+  /** Raw response for the upload-URL request, replacing the normal one. */
+  uploadUrlsResponse?: () => Response;
   /** HTTP status for the upload PUT. */
   uploadStatus?: number;
   /** Text in every error response's JSON `message`, to check it never reaches the caller. */
@@ -154,8 +160,9 @@ export function fakeApi(options: FakeApiOptions = {}) {
 
   function error(status: number): Response {
     if (status === 204) return new Response(null, { status });
+    const code = status === 402 ? "insufficient_credits" : `http_${status}`;
     return Response.json(
-      { code: `http_${status}`, message: options.errorMessage ?? `Request failed (${status})` },
+      { code, message: options.errorMessage ?? `Request failed (${status})` },
       { status }
     );
   }
@@ -171,7 +178,8 @@ export function fakeApi(options: FakeApiOptions = {}) {
     projects.set(id, {
       id,
       kind,
-      url: `${STORAGE}/outputs/${id}.${extension}?X-Goog-Signature=signature-${n}&X-Goog-Expires=86400`,
+      // Real signatures contain percent-encoded characters that must reach storage unchanged.
+      url: `${STORAGE}/outputs/${id}.${extension}?X-Goog-Signature=sig%2Bout%2F${n}%26x%3D&X-Goog-Expires=86400`,
       bytes: kind === "image" ? makePng(n * 40, 255 - n * 40, n) : makeMp4(n),
       polls: 0,
       statuses: options.statusesFor?.(n) ?? options.statuses ?? ["queued", "rendering", "complete"],
@@ -203,16 +211,20 @@ export function fakeApi(options: FakeApiOptions = {}) {
       if (onStall) {
         let started = false;
         return new Response(
-          new ReadableStream({
-            pull(controller) {
-              if (!started) {
-                started = true;
-                signal.addEventListener("abort", () => controller.error(abortError(signal)));
-                onStall();
-              }
-              return new Promise(() => {});
+          new ReadableStream(
+            {
+              pull(controller) {
+                if (!started) {
+                  started = true;
+                  signal.addEventListener("abort", () => controller.error(abortError(signal)));
+                  onStall();
+                }
+                return new Promise(() => {});
+              },
             },
-          })
+            // Pull only when the consumer reads, not as soon as the response exists.
+            { highWaterMark: 0 }
+          )
         );
       }
       return new Response(project.bytes as BodyInit);
@@ -223,9 +235,10 @@ export function fakeApi(options: FakeApiOptions = {}) {
       if (!isJson(call.headers)) return error(415);
       if (options.uploadUrlsStatus && options.uploadUrlsStatus !== 200)
         return error(options.uploadUrlsStatus);
+      if (options.uploadUrlsResponse) return options.uploadUrlsResponse();
       const n = uploads.length + 1;
       const upload = {
-        url: `${STORAGE}/uploads/input-${n}.png?X-Goog-Signature=upload-${n}`,
+        url: `${STORAGE}/uploads/input-${n}.png?X-Goog-Signature=sig%2Bup%2F${n}%26y%3D`,
         filePath: `api-assets/test/input-${n}.png`,
       };
       uploads.push(upload);
@@ -254,19 +267,42 @@ export function fakeApi(options: FakeApiOptions = {}) {
         return error(options.projectStatus);
       const project = projects.get(decodeURIComponent(match[2]));
       if (!project || project.kind !== match[1]) return error(404);
+      const raw = options.pollResponse?.();
+      if (raw) return raw;
       const status = project.statuses[Math.min(project.polls++, project.statuses.length - 1)];
-      return Response.json({
+      const downloads =
+        status === "complete"
+          ? (options.downloads?.(project) ?? [
+              { url: project.url, expires_at: "2099-01-01T00:00:00Z" },
+            ])
+          : [];
+      const credits = options.creditsCharged ?? 5;
+      // Every field the spec marks required, so a stricter parser still accepts these.
+      const common = {
         id: project.id,
+        name: `Project ${project.id}`,
         status,
-        credits_charged: options.creditsCharged ?? 5,
+        created_at: "2026-11-19T00:00:00Z",
+        enabled: true,
+        total_frame_cost: credits,
+        credits_charged: credits,
         error: status === "error" ? (options.projectError ?? null) : null,
-        downloads:
-          status === "complete"
-            ? (options.downloads?.(project) ?? [
-                { url: project.url, expires_at: "2099-01-01T00:00:00Z" },
-              ])
-            : [],
-      });
+        downloads,
+      };
+      return Response.json(
+        project.kind === "image"
+          ? { ...common, type: "AI_IMAGE", image_count: 1 }
+          : {
+              ...common,
+              type: "TEXT_TO_VIDEO",
+              width: 854,
+              height: 480,
+              start_seconds: 0,
+              end_seconds: 5,
+              fps: 24,
+              download: downloads[0] ?? null,
+            }
+      );
     }
     return error(404);
   }
