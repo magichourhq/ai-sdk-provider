@@ -28,6 +28,19 @@ describe("API key", () => {
     expect(api.calls).toHaveLength(0);
   });
 
+  test("reads MAGIC_HOUR_API_KEY on every call, so a rotated key takes effect", async () => {
+    const api = fakeApi({ statuses: ["complete"] });
+    const model = createMagicHour({ fetch: api.fetch, pollIntervalMs: 0 }).image();
+    vi.stubEnv("MAGIC_HOUR_API_KEY", "old-key");
+    await generateImage({ model, prompt: "Mug", maxRetries: 0 });
+    vi.stubEnv("MAGIC_HOUR_API_KEY", "new-key");
+    await generateImage({ model, prompt: "Mug", maxRetries: 0 });
+    expect(api.generations().map((c) => c.headers.get("Authorization"))).toEqual([
+      "Bearer old-key",
+      "Bearer new-key",
+    ]);
+  });
+
   test("falls back to MAGIC_HOUR_API_KEY at call time", async () => {
     const api = fakeApi({ statuses: ["complete"] });
     const provider = createMagicHour({ fetch: api.fetch, pollIntervalMs: 0 });

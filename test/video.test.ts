@@ -150,6 +150,18 @@ describe("image-to-video request", () => {
     expect(api.generations()[0].body.assets.image_file_path).toBe("api-assets/test/input-1.png");
   });
 
+  test("a data URL whose bytes aren't the declared image type starts nothing", async () => {
+    const api = fakeApi();
+    await expect(
+      generateVideo({
+        model: api.provider().video(),
+        prompt: { image: "data:image/png;base64,SGVsbG8=", text: "Animate" },
+        maxRetries: 0,
+      })
+    ).rejects.toThrow();
+    expect(api.calls).toHaveLength(0);
+  });
+
   test("uploads base64 image data passed to the model directly", async () => {
     const api = fakeApi({ statuses: ["complete"] });
     await api.provider().video().doGenerate!(
@@ -252,6 +264,19 @@ describe("image-to-video request", () => {
       first.filePath,
       next.filePath,
     ]);
+  });
+
+  test("a model reused for image-to-video and then text-only sends each job its own way", async () => {
+    const api = fakeApi({ statuses: ["complete"] });
+    const model = api.provider().video();
+    await generateVideo({ model, prompt: { image: png, text: "Animate" }, maxRetries: 0 });
+    await generateVideo({ model, prompt: "Waves", maxRetries: 0 });
+    const [imageJob, textJob] = api.generations();
+    expect(imageJob.url).toBe(`${API}/v1/image-to-video`);
+    expect(textJob.url).toBe(`${API}/v1/text-to-video`);
+    expect(textJob.body).not.toHaveProperty("assets");
+    expect(textJob.body.style).toEqual({ prompt: "Waves" });
+    expect(api.uploadUrlRequests()).toHaveLength(1);
   });
 
   test("sends an HTTPS image URL directly, without downloading or uploading it", async () => {
@@ -383,6 +408,8 @@ describe("a failed upload never starts a paid job", () => {
     ["empty bytes", new Uint8Array(0)],
     ["an empty base64 string", ""],
     ["invalid base64", "iVBORw0KGgo!!"],
+    ["text labeled as a PNG", Buffer.from("Hello").toString("base64")],
+    ["JPEG bytes labeled as a PNG", jpeg],
     ["base64 missing a character", "iVBORw0KGgoAA"],
   ])("an input image with %s", async (_, data) => {
     const api = fakeApi();

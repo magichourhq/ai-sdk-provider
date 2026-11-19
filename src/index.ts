@@ -44,6 +44,18 @@ function extra(options: ImageModelV4CallOptions | VideoModelV4CallOptions, allow
     if (!allowed.includes(key)) throw new Error(`Unsupported Magic Hour option: ${key}.`);
   return values;
 }
+function ascii(text: string): number[] {
+  return [...text].map((c) => c.charCodeAt(0));
+}
+/** Checks the file signature, so mislabeled or non-image data never reaches a paid job. */
+function hasSignature(bytes: Uint8Array, extension: string): boolean {
+  function startsWith(offset: number, signature: number[]): boolean {
+    return signature.every((byte, i) => bytes[offset + i] === byte);
+  }
+  if (extension === "png") return startsWith(0, [0x89, ...ascii("PNG\r\n"), 0x1a, 0x0a]);
+  if (extension === "jpg") return startsWith(0, [0xff, 0xd8, 0xff]);
+  return startsWith(0, ascii("RIFF")) && startsWith(8, ascii("WEBP"));
+}
 /** Decodes strict base64, which `Buffer.from` would otherwise accept with characters dropped. */
 function base64Bytes(value: string): Uint8Array {
   if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value))
@@ -229,6 +241,8 @@ export function createMagicHour(settings: MagicHourSettings = {}): MagicHourProv
             typeof options.image.data === "string"
               ? base64Bytes(options.image.data)
               : options.image.data;
+          if (!hasSignature(bytes, extension))
+            throw new Error(`The input image data isn't a ${extension.toUpperCase()} file.`);
           imagePath = await transport.uploadImage(bytes, extension, signal);
         }
         const timestamp = new Date();

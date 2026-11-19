@@ -218,6 +218,10 @@ describe("paid generations are never retried", () => {
     const api = fakeApi({ createResponse });
     const error = await rejection(runImage(api));
     expect(error).toBeInstanceOf(MagicHourError);
+    // The server may have charged, so the caller must check before submitting again.
+    expect((error as MagicHourError).projectId).toBeUndefined();
+    expect((error as MagicHourError).isRetryable).toBe(false);
+    expect((error as Error).message).toMatch(/check account history before submitting again/i);
     expect((error as Error).message).not.toContain("MALFORMED_SENTINEL");
     expect(api.generations()).toHaveLength(1);
     expect(api.polls()).toHaveLength(0);
@@ -483,6 +487,16 @@ describe("cancellation", () => {
     expect(error).toBeInstanceOf(Error);
     expect(elapsed).toBeLessThan(1200);
     expect(api.storage()).toHaveLength(0);
+    expect(api.generations()).toHaveLength(0);
+  });
+
+  test("an upload PUT that never answers is bounded by timeoutMs", async () => {
+    const api = fakeApi({ hold: (c) => c.method === "PUT" });
+    const { error, elapsed } = await underFakeTime(() =>
+      runImageVideo(api, { settings: { timeoutMs: 1000 } })
+    );
+    expect(error).toBeInstanceOf(Error);
+    expect(elapsed).toBeLessThan(1200);
     expect(api.generations()).toHaveLength(0);
   });
 
@@ -889,11 +903,76 @@ describe("credentials and error contents", () => {
     }
   });
 
+  for (const [endpoint, run] of endpoints)
+    test.each<[string, (c: { url: string; method: string }) => boolean]>([
+      ["poll", (c) => /-projects\//.test(c.url)],
+      ["download", (c) => c.method === "GET" && c.url.startsWith(STORAGE)],
+    ])(`${endpoint}: a %s network failure names the accepted project`, async (_, match) => {
+      const api = fakeApi({ statuses: ["complete"] });
+      const fetch: typeof globalThis.fetch = async (input, init) => {
+        const request = new Request(input, init);
+        if (match({ url: request.url, method: request.method }))
+          throw new TypeError("read ECONNRESET");
+        return api.fetch(input, init);
+      };
+      const error = await rejection(run(api, { settings: { fetch } }));
+      expectRecoverable(error, onlyProject(api));
+      expect(api.generations()).toHaveLength(1);
+    });
+
   test("an API key that isn't a valid header value never appears in the error", async () => {
     const api = fakeApi();
     const error = await rejection(runImage(api, { settings: { apiKey: "bad\nKEY_SECRET_9" } }));
-    expect((error as Error).message).not.toContain("KEY_SECRET_9");
+    expectNoSecret(error, "KEY_SECRET_9");
     expect(api.generations()).toHaveLength(0);
+  });
+
+  test.each<[string, Run, FakeApiOptions]>([
+    [
+      "a plain-HTTP download URL",
+      runImage,
+      {
+        statuses: ["complete"],
+        downloads: () => [
+          { url: "http://storage.example/out.png?sig=URL_SECRET_42", expires_at: "2099-01-01" },
+        ],
+      },
+    ],
+    [
+      "a plain-HTTP upload URL",
+      runImageVideo,
+      {
+        uploadUrlsBody: {
+          items: [
+            {
+              upload_url: "http://storage.example/in.png?sig=URL_SECRET_42",
+              file_path: "api-assets/x.png",
+              expires_at: "2099-01-01T00:00:00Z",
+            },
+          ],
+        },
+      },
+    ],
+    [
+      "an upload URL with embedded credentials",
+      runImageVideo,
+      {
+        uploadUrlsBody: {
+          items: [
+            {
+              upload_url: "https://user:URL_SECRET_42@storage.example/in.png",
+              file_path: "api-assets/x.png",
+              expires_at: "2099-01-01T00:00:00Z",
+            },
+          ],
+        },
+      },
+    ],
+  ])("rejecting %s never echoes it", async (_, run, options) => {
+    const api = fakeApi(options);
+    const error = await rejection(run(api));
+    expectNoSecret(error, "URL_SECRET_42");
+    expect(api.calls.some((c) => c.url.includes("URL_SECRET_42"))).toBe(false);
   });
 
   test("a caller's abort reason during an upload never appears in the error", async () => {
