@@ -106,6 +106,10 @@ export type FakeApiOptions = {
   breakBody?: (call: Call) => boolean;
   /** Sets the deprecated single `download` field on video projects to null. */
   nullDownloadField?: boolean;
+  /** Holds a request until the returned promise settles (or the request is aborted). */
+  gate?: (call: Call) => Promise<void> | undefined;
+  /** HTTP status for one project's download, overriding `downloadStatus`. */
+  downloadStatusFor?: (project: Project) => number | undefined;
   /** Milliseconds to wait before answering a request (uses setTimeout, so fake timers apply). */
   delay?: (call: Call) => number;
 };
@@ -170,7 +174,11 @@ function stalledBody(signal: AbortSignal, onStall: () => void): ReadableStream<U
       pull(controller) {
         if (!started) {
           started = true;
-          signal.addEventListener("abort", () => controller.error(abortError(signal)));
+          // The abort may already have happened between the headers and this first read.
+          if (signal.aborted) return controller.error(abortError(signal));
+          signal.addEventListener("abort", () => controller.error(abortError(signal)), {
+            once: true,
+          });
           onStall();
         }
         return new Promise(() => {});
@@ -253,7 +261,7 @@ export function fakeApi(options: FakeApiOptions = {}) {
       }
       const project = [...projects.values()].find((p) => p.url === url);
       if (method !== "GET" || !project) return error(404);
-      const status = options.downloadStatus ?? 200;
+      const status = options.downloadStatusFor?.(project) ?? options.downloadStatus ?? 200;
       if (status !== 200) return error(status);
       if (options.emptyDownload) return new Response(new Uint8Array(0));
       return new Response(project.bytes as BodyInit);
@@ -340,6 +348,8 @@ export function fakeApi(options: FakeApiOptions = {}) {
   async function handle(call: Call, signal: AbortSignal): Promise<Response> {
     calls.push(call);
     if (options.hold?.(call)) return untilAborted(signal);
+    const gate = options.gate?.(call);
+    if (gate) await Promise.race([gate, untilAborted(signal)]);
     const delay = options.delay?.(call);
     if (delay) await sleep(delay, signal);
     const onStall = options.stallBody?.(call);
@@ -361,8 +371,10 @@ export function fakeApi(options: FakeApiOptions = {}) {
 
   const fetch: typeof globalThis.fetch = async (input, init) => {
     const request = new Request(input, init);
+    // The caller's own signal, so aborts reach the fake without an extra hop.
+    const signal = init?.signal ?? request.signal;
     // Like the real fetch, an already-aborted request never reaches the network.
-    if (request.signal.aborted) throw abortError(request.signal);
+    if (signal.aborted) throw abortError(signal);
     const bytes = new Uint8Array(await request.arrayBuffer());
     const call: Call = {
       url: request.url,
@@ -376,7 +388,7 @@ export function fakeApi(options: FakeApiOptions = {}) {
           : bytes
         : undefined,
     };
-    return handle(call, request.signal);
+    return handle(call, signal);
   };
 
   return {

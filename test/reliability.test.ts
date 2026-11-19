@@ -190,6 +190,18 @@ describe("paid generations are never retried", () => {
     }
   );
 
+  test("a submission response the JSON parser rejects never echoes its body", async () => {
+    // V8's parser error quotes the start of the text.
+    const api = fakeApi({
+      createResponse: () =>
+        new Response("SECRET_JSON_123 {", { headers: { "Content-Type": "application/json" } }),
+    });
+    const error = await rejection(runImage(api));
+    expect(error).toBeInstanceOf(MagicHourError);
+    expectNoSecret(error, "SECRET_JSON_123");
+    expect(api.generations()).toHaveLength(1);
+  });
+
   test.each<[string, () => Response]>([
     ["no project ID", () => Response.json({ credits_charged: 5 })],
     ["an empty project ID", () => Response.json({ id: "" })],
@@ -257,7 +269,7 @@ describe("failures after acceptance name the accepted project", () => {
         });
         const error = await rejection(run(api));
         expectRecoverable(error, onlyProject(api));
-        expect((error as Error).message).not.toContain("tk_SECRET_123");
+        expectNoSecret(error, "tk_SECRET_123");
       });
 
       test("when the second of two jobs fails, the error names the second project", async () => {
@@ -297,6 +309,77 @@ describe("failures after acceptance name the accepted project", () => {
         expect(elapsed).toBeLessThan(1200);
       });
     });
+});
+
+describe("overlapping calls on one model", () => {
+  /** Waits until a condition holds, letting pending I/O run in between. */
+  async function until(condition: () => boolean) {
+    for (let i = 0; i < 1000 && !condition(); i++)
+      await new Promise((resolve) => setImmediate(resolve));
+    expect(condition()).toBe(true);
+  }
+
+  const models: [
+    string,
+    (api: Api) => (prompt: string, signal?: AbortSignal) => Promise<unknown>,
+  ][] = [
+    [
+      "image",
+      (api) => {
+        const model = api.provider({ pollIntervalMs: 5 }).image();
+        return (prompt, abortSignal) =>
+          generateImage({ model, prompt, abortSignal, maxRetries: 0 });
+      },
+    ],
+    [
+      "video",
+      (api) => {
+        const model = api.provider({ pollIntervalMs: 5 }).video();
+        return (prompt, abortSignal) =>
+          generateVideo({ model, prompt, abortSignal, maxRetries: 0 });
+      },
+    ],
+  ];
+
+  test.each(models)(
+    "%s: a late download failure names its own project, not the one that finished first",
+    async (_, start) => {
+      let releaseFirst!: () => void;
+      const firstDownload = new Promise<void>((resolve) => (releaseFirst = resolve));
+      const api: Api = fakeApi({
+        statuses: ["complete"],
+        gate: (c) =>
+          isDownload(c) && c.url === api.projects()[0]?.url ? firstDownload : undefined,
+        downloadStatusFor: (p) => (p.id === api.projects()[0].id ? 403 : undefined),
+      });
+      const generate = start(api);
+      const first = rejection(generate("First"));
+      await until(() => api.storage().some((c) => c.url === api.projects()[0]?.url));
+      await generate("Second");
+      releaseFirst();
+      const error = await first;
+      expect(api.projects()).toHaveLength(2);
+      expectRecoverable(error, api.projects()[0].id);
+      expect((error as Error).message).not.toContain(api.projects()[1].id);
+    }
+  );
+
+  test.each(models)("%s: aborting one call leaves the other running", async (_, start) => {
+    const api = fakeApi({ statuses: ["rendering", "rendering", "rendering", "complete"] });
+    const generate = start(api);
+    const first = new AbortController();
+    const second = new AbortController();
+    const firstRun = rejection(generate("First", first.signal));
+    const secondRun = generate("Second", second.signal);
+    await until(() => api.projects().length === 2);
+    first.abort();
+    expectRecoverable(await firstRun, api.projects()[0].id);
+    const result = (await secondRun) as {
+      image?: { uint8Array: Uint8Array };
+      video?: { uint8Array: Uint8Array };
+    };
+    expect((result.image ?? result.video)!.uint8Array).toEqual(api.projects()[1].bytes);
+  });
 });
 
 describe("cancellation", () => {
@@ -387,6 +470,19 @@ describe("cancellation", () => {
   test("aborting an in-flight upload starts no paid job", async () => {
     const { api, signal } = abortWhenHeld((c) => c.method === "PUT");
     await expect(runImageVideo(api, { abortSignal: signal })).rejects.toThrow();
+    expect(api.generations()).toHaveLength(0);
+  });
+
+  test("an upload-URL response whose body stalls is bounded by timeoutMs", async () => {
+    const api = fakeApi({
+      stallBody: (c) => c.url.endsWith("/files/upload-urls") && (() => {}),
+    });
+    const { error, elapsed } = await underFakeTime(() =>
+      runImageVideo(api, { settings: { timeoutMs: 1000 } })
+    );
+    expect(error).toBeInstanceOf(Error);
+    expect(elapsed).toBeLessThan(1200);
+    expect(api.storage()).toHaveLength(0);
     expect(api.generations()).toHaveLength(0);
   });
 
@@ -486,7 +582,7 @@ describe("timing", () => {
     );
     expectRecoverable(error, onlyProject(api));
     expect(elapsed).toBeGreaterThanOrEqual(600_000);
-    expect(elapsed).toBeLessThan(631_000);
+    expect(elapsed).toBeLessThan(601_000);
   });
 
   test("timeoutMs also bounds a call whose caller passes its own signal", async () => {
@@ -693,6 +789,32 @@ describe("credentials and error contents", () => {
     });
   });
 
+  test("concurrent image-to-video tenants each use their own key, including for uploads", async () => {
+    const api = fakeApi({ statuses: ["rendering", "complete"] });
+    const keys = ["key-tenant-a", "key-tenant-b"];
+    await Promise.all(
+      keys.map((apiKey, i) =>
+        generateVideo({
+          model: api.provider({ apiKey, pollIntervalMs: 5 }).video(),
+          prompt: { image: png, text: `Tenant ${i}` },
+          maxRetries: 0,
+        })
+      )
+    );
+    expect(api.generations()).toHaveLength(2);
+    for (const call of api.generations()) {
+      const bearer = `Bearer ${keys[Number(call.body.style.prompt.replace("Tenant ", ""))]}`;
+      expect(call.headers.get("Authorization")).toBe(bearer);
+      const upload = api
+        .uploads()
+        .findIndex((u) => u.filePath === call.body.assets.image_file_path);
+      expect(api.uploadUrlRequests()[upload].headers.get("Authorization")).toBe(bearer);
+      const project = api.projects()[api.generations().indexOf(call)].id;
+      for (const poll of api.polls().filter((c) => c.url.endsWith(`/${project}`)))
+        expect(poll.headers.get("Authorization")).toBe(bearer);
+    }
+  });
+
   test.each(endpoints)(
     "%s: a caller's Authorization header can't replace the configured key",
     async (_, run) => {
@@ -760,6 +882,11 @@ describe("credentials and error contents", () => {
     expect(error).toBeInstanceOf(Error);
     expectNoSecret(error, key);
     expectNoSecret(error, "Signature");
+    // After acceptance, a network failure must still name the project to resume.
+    if (api.projects().length) {
+      expectRecoverable(error, onlyProject(api));
+      expect(api.generations()).toHaveLength(1);
+    }
   });
 
   test("an API key that isn't a valid header value never appears in the error", async () => {
@@ -779,7 +906,7 @@ describe("credentials and error contents", () => {
       },
     });
     const error = await rejection(runImageVideo(api, { abortSignal: controller.signal }));
-    expect(String((error as Error)?.message)).not.toContain("ABORT_REASON_SECRET");
+    expectNoSecret(error, "ABORT_REASON_SECRET");
     expect(api.generations()).toHaveLength(0);
   });
 
