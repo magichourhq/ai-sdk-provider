@@ -16,48 +16,44 @@ afterEach(() => {
 });
 
 type Api = ReturnType<typeof fakeApi>;
-type Run = (
-  api: Api,
-  extra?: { settings?: MagicHourSettings; abortSignal?: AbortSignal; maxRetries?: number }
-) => Promise<unknown>;
+type RunOptions = {
+  settings?: MagicHourSettings;
+  abortSignal?: AbortSignal;
+  maxRetries?: number;
+  headers?: Record<string, string>;
+};
+type Run = (api: Api, options?: RunOptions) => Promise<unknown>;
 
-/** One way to start each paid endpoint through the AI SDK. */
-const endpoints: [string, Run][] = [
-  [
-    "ai-image-generator",
-    (api, { settings, abortSignal, maxRetries = 3 } = {}) =>
-      generateImage({
-        model: api.provider(settings).image(),
-        prompt: "Mug",
-        abortSignal,
-        maxRetries,
-      }),
-  ],
-  [
-    "text-to-video",
-    (api, { settings, abortSignal, maxRetries = 3 } = {}) =>
-      generateVideo({
-        model: api.provider(settings).video(),
-        prompt: "Waves",
-        abortSignal,
-        maxRetries,
-      }),
-  ],
-  [
-    "image-to-video",
-    (api, { settings, abortSignal, maxRetries = 3 } = {}) =>
-      generateVideo({
-        model: api.provider(settings).video(),
-        prompt: { image: png, text: "Animate" },
-        abortSignal,
-        maxRetries,
-      }),
-  ],
-];
-const [runImage, runTextVideo] = [endpoints[0][1], endpoints[1][1]];
-const kinds: [string, Run][] = [
-  ["image", runImage],
-  ["video", runTextVideo],
+const runImage: Run = (api, { settings, abortSignal, maxRetries = 3, headers } = {}) =>
+  generateImage({
+    model: api.provider(settings).image(),
+    prompt: "Mug",
+    abortSignal,
+    maxRetries,
+    headers,
+  });
+const runTextVideo: Run = (api, { settings, abortSignal, maxRetries = 3, headers } = {}) =>
+  generateVideo({
+    model: api.provider(settings).video(),
+    prompt: "Waves",
+    abortSignal,
+    maxRetries,
+    headers,
+  });
+const runImageVideo: Run = (api, { settings, abortSignal, maxRetries = 3, headers } = {}) =>
+  generateVideo({
+    model: api.provider(settings).video(),
+    prompt: { image: png, text: "Animate" },
+    abortSignal,
+    maxRetries,
+    headers,
+  });
+
+/** Each paid endpoint, started through the AI SDK, with the project kind it creates. */
+const endpoints: [endpoint: string, run: Run, kind: "image" | "video"][] = [
+  ["ai-image-generator", runImage, "image"],
+  ["text-to-video", runTextVideo, "video"],
+  ["image-to-video", runImageVideo, "video"],
 ];
 
 async function rejection(promise: Promise<unknown>): Promise<unknown> {
@@ -69,14 +65,27 @@ async function rejection(promise: Promise<unknown>): Promise<unknown> {
   throw new Error("Expected the call to reject");
 }
 
-/** Asserts the error names the project the API actually accepted, so the caller can resume it. */
-function expectRecoverable(error: unknown, api: Api) {
-  const accepted = api.projects();
-  expect(accepted).toHaveLength(1);
+/** Asserts the error names the given accepted project, so the caller can resume it. */
+function expectRecoverable(error: unknown, projectId: string) {
   expect(error).toBeInstanceOf(MagicHourError);
-  expect((error as MagicHourError).projectId).toBe(accepted[0].id);
+  expect((error as MagicHourError).name).toBe("MagicHourError");
+  expect((error as MagicHourError).projectId).toBe(projectId);
   expect((error as MagicHourError).isRetryable).toBe(false);
-  expect((error as MagicHourError).message).toContain(accepted[0].id);
+  expect((error as MagicHourError).message).toContain(projectId);
+}
+
+/** The only project the fake accepted. */
+function onlyProject(api: Api): string {
+  expect(api.projects()).toHaveLength(1);
+  return api.projects()[0].id;
+}
+
+/** Asserts a submission whose outcome is unknown: no project ID, so nothing to resume. */
+function expectAcceptanceUnknown(error: unknown) {
+  expect(error).toBeInstanceOf(MagicHourError);
+  expect((error as MagicHourError).isRetryable).toBe(false);
+  expect((error as MagicHourError).projectId).toBeUndefined();
+  expect((error as Error).message).toMatch(/Acceptance is unknown/);
 }
 
 /** Runs a call to completion under fake timers and reports the virtual time it took. */
@@ -95,7 +104,7 @@ async function underFakeTime(start: () => Promise<unknown>) {
 }
 
 describe("paid generations are never retried", () => {
-  const rejected = [400, 401, 402, 404, 409, 422, 429];
+  const rejected = [400, 401, 402, 403, 404, 409, 422, 429];
   const ambiguous = [408, 500, 502, 503, 504];
 
   for (const [endpoint, run] of endpoints) {
@@ -118,10 +127,8 @@ describe("paid generations are never retried", () => {
           const api = fakeApi({ createStatus: status });
           const error = await rejection(run(api));
           expect(api.generations()).toHaveLength(1);
-          expect(error).toBeInstanceOf(MagicHourError);
-          expect((error as MagicHourError).isRetryable).toBe(false);
+          expectAcceptanceUnknown(error);
           expect((error as MagicHourError).status).toBe(status);
-          expect((error as Error).message).toMatch(/Acceptance is unknown/);
         }
       );
 
@@ -129,28 +136,41 @@ describe("paid generations are never retried", () => {
         const api = fakeApi({ createNetworkError: true });
         const error = await rejection(run(api));
         expect(api.generations()).toHaveLength(1);
-        expect(error).toBeInstanceOf(MagicHourError);
-        expect((error as Error).message).toMatch(/Acceptance is unknown/);
+        expectAcceptanceUnknown(error);
       });
 
-      test("a redirect is never followed, so the POST isn't replayed", async () => {
-        const api = fakeApi({ createRedirect: true });
+      test.each([
+        ["the same endpoint", `${API}/v1/${endpoint}`],
+        ["another origin", `https://attacker.example/v1/${endpoint}`],
+      ])("a redirect to %s is never followed, so the POST isn't replayed", async (_, to) => {
+        const api = fakeApi({ redirect: (c) => (isGeneration(c) ? to : undefined) });
         const error = await rejection(run(api));
-        expect(api.generations()).toHaveLength(1);
+        const posts = api.calls.filter((c) => c.method === "POST" && c.url.endsWith(endpoint));
+        expect(posts).toHaveLength(1);
         expect(api.projects()).toHaveLength(0);
-        expect((error as Error).message).toMatch(/Acceptance is unknown/);
+        expect(api.calls.some((c) => c.url.startsWith("https://attacker.example"))).toBe(false);
+        expectAcceptanceUnknown(error);
       });
     });
   }
 
-  test.each([
-    ["no project ID", () => ({ credits_charged: 5 })],
-    ["an empty project ID", () => ({ id: "" })],
-    ["a non-string project ID", () => ({ id: 42 })],
-    ["a non-JSON body", () => "not json"],
-  ])("an accepted response with %s fails without resubmitting", async (_, createBody) => {
-    const api = fakeApi({ createBody });
-    await expect(runImage(api)).rejects.toBeInstanceOf(MagicHourError);
+  test.each<[string, () => Response]>([
+    ["no project ID", () => Response.json({ credits_charged: 5 })],
+    ["an empty project ID", () => Response.json({ id: "" })],
+    ["a non-string project ID", () => Response.json({ id: 42 })],
+    ["a JSON string body", () => Response.json("project-1")],
+    [
+      "malformed JSON",
+      () =>
+        new Response('{"id": "project-1", "note": "MALFORMED_SENTINEL', {
+          headers: { "Content-Type": "application/json" },
+        }),
+    ],
+  ])("an accepted response with %s fails without resubmitting", async (_, createResponse) => {
+    const api = fakeApi({ createResponse });
+    const error = await rejection(runImage(api));
+    expect(error).toBeInstanceOf(MagicHourError);
+    expect((error as Error).message).not.toContain("MALFORMED_SENTINEL");
     expect(api.generations()).toHaveLength(1);
     expect(api.polls()).toHaveLength(0);
   });
@@ -172,14 +192,16 @@ describe("failures after acceptance name the accepted project", () => {
     ["a failed poll", { projectStatus: 500 }],
     ["a missing project", { projectStatus: 404 }],
     ["a failed download", { statuses: ["complete"], downloadStatus: 403 }],
+    ["a download with no content (204)", { statuses: ["complete"], downloadStatus: 204 }],
+    ["an empty download (200)", { statuses: ["complete"], emptyDownload: true }],
   ];
 
-  for (const [kind, run] of kinds)
-    describe(kind, () => {
+  for (const [endpoint, run] of endpoints)
+    describe(endpoint, () => {
       test.each(cases)("%s", async (_, options) => {
         const api = fakeApi(options);
         const error = await rejection(run(api));
-        expectRecoverable(error, api);
+        expectRecoverable(error, onlyProject(api));
         expect(api.generations()).toHaveLength(1);
         expect(api.calls.some((c) => c.url.startsWith("http://"))).toBe(false);
       });
@@ -190,8 +212,19 @@ describe("failures after acceptance name the accepted project", () => {
           projectError: { message: "internal token tk_SECRET_123 leaked", code: "internal" },
         });
         const error = await rejection(run(api));
-        expectRecoverable(error, api);
+        expectRecoverable(error, onlyProject(api));
         expect((error as Error).message).not.toContain("tk_SECRET_123");
+      });
+
+      test("when the second of two jobs fails, the error names the second project", async () => {
+        const api = fakeApi({
+          statusesFor: (n) => (n === 2 ? ["rendering", "error"] : ["complete"]),
+        });
+        await run(api);
+        const error = await rejection(run(api));
+        expect(api.projects()).toHaveLength(2);
+        expectRecoverable(error, api.projects()[1].id);
+        expect((error as Error).message).not.toContain(api.projects()[0].id);
       });
     });
 });
@@ -220,53 +253,84 @@ describe("cancellation", () => {
     expect(api.calls).toHaveLength(0);
   });
 
-  test("aborting during submission stops it and leaves acceptance unknown", async () => {
-    const { api, signal } = abortWhenHeld((c) => c.method === "POST");
-    const error = await rejection(runImage(api, { abortSignal: signal }));
-    expect(error).toBeInstanceOf(MagicHourError);
-    expect((error as Error).message).toMatch(/Acceptance is unknown/);
-    expect(api.generations()).toHaveLength(1);
-  });
+  test.each(endpoints)(
+    "%s: aborting during submission leaves acceptance unknown",
+    async (_, run) => {
+      const { api, signal } = abortWhenHeld(isGeneration);
+      const error = await rejection(run(api, { abortSignal: signal }));
+      expectAcceptanceUnknown(error);
+      expect(api.generations()).toHaveLength(1);
+    }
+  );
 
-  for (const [kind, run] of kinds) {
-    test(`aborting an in-flight ${kind} poll names the project and stops polling`, async () => {
+  for (const [endpoint, run] of endpoints) {
+    test(`${endpoint}: aborting an in-flight poll names the project and stops polling`, async () => {
       const { api, signal } = abortWhenHeld(isPoll);
-      expectRecoverable(await rejection(run(api, { abortSignal: signal })), api);
+      expectRecoverable(await rejection(run(api, { abortSignal: signal })), onlyProject(api));
       expect(api.polls()).toHaveLength(1);
     });
 
-    test(`aborting an in-flight ${kind} download names the project`, async () => {
-      const { api, signal } = abortWhenHeld((c) => c.url.startsWith(STORAGE), {
-        statuses: ["complete"],
-      });
-      expectRecoverable(await rejection(run(api, { abortSignal: signal })), api);
+    test(`${endpoint}: aborting an in-flight download names the project`, async () => {
+      const { api, signal } = abortWhenHeld(
+        (c) => c.method === "GET" && c.url.startsWith(STORAGE),
+        { statuses: ["complete"] }
+      );
+      expectRecoverable(await rejection(run(api, { abortSignal: signal })), onlyProject(api));
     });
 
-    test(`aborting while a ${kind} download body streams names the project`, async () => {
+    test(`${endpoint}: aborting while the download body streams names the project`, async () => {
       const controller = new AbortController();
-      const api = fakeApi({
-        statuses: ["complete"],
-        holdBody: () => {
-          queueMicrotask(() => controller.abort());
-          return true;
-        },
+      const api = fakeApi({ statuses: ["complete"], stallBody: () => () => controller.abort() });
+      expectRecoverable(
+        await rejection(run(api, { abortSignal: controller.signal })),
+        onlyProject(api)
+      );
+    });
+
+    test(`${endpoint}: aborting between polls settles without waiting out the interval`, async () => {
+      const api = fakeApi({ statuses: ["rendering"] });
+      const controller = new AbortController();
+      const { error, elapsed } = await underFakeTime(() => {
+        setTimeout(() => controller.abort(), 100);
+        return run(api, { settings: { pollIntervalMs: 60_000 }, abortSignal: controller.signal });
       });
-      expectRecoverable(await rejection(run(api, { abortSignal: controller.signal })), api);
+      expectRecoverable(error, onlyProject(api));
+      expect(elapsed).toBeLessThan(1000);
+      expect(api.polls()).toHaveLength(1);
     });
   }
 
   test("aborting an in-flight upload starts no paid job", async () => {
     const { api, signal } = abortWhenHeld((c) => c.method === "PUT");
-    const run = endpoints[2][1];
-    await expect(run(api, { abortSignal: signal })).rejects.toThrow();
+    await expect(runImageVideo(api, { abortSignal: signal })).rejects.toThrow();
     expect(api.generations()).toHaveLength(0);
   });
 
   test("aborting during the upload-URL request starts no paid job", async () => {
     const { api, signal } = abortWhenHeld((c) => c.url.endsWith("/files/upload-urls"));
-    const run = endpoints[2][1];
-    await expect(run(api, { abortSignal: signal })).rejects.toThrow();
+    await expect(runImageVideo(api, { abortSignal: signal })).rejects.toThrow();
     expect(api.generations()).toHaveLength(0);
+  });
+});
+
+describe("redirects and cookies", () => {
+  test.each<[string, (c: Call) => boolean]>([
+    ["a project poll", (c) => /-projects\//.test(c.url)],
+    ["the upload-URL request", (c) => c.url.endsWith("/files/upload-urls")],
+  ])("a cross-origin redirect on %s is never followed", async (_, match) => {
+    const api = fakeApi({
+      redirect: (c) => (match(c) ? "https://attacker.example/steal" : undefined),
+    });
+    await expect(runImageVideo(api)).rejects.toThrow();
+    expect(api.calls.some((c) => c.url.startsWith("https://attacker.example"))).toBe(false);
+    expect(api.generations().length).toBeLessThanOrEqual(1);
+  });
+
+  test("storage requests never send cookies", async () => {
+    const api = fakeApi();
+    await runImageVideo(api);
+    expect(api.storage().length).toBeGreaterThan(1);
+    for (const call of api.storage()) expect(call.credentials).toBe("omit");
   });
 });
 
@@ -293,12 +357,28 @@ describe("timing", () => {
       delay: (c) => (c.method === "PUT" ? 600 : isGeneration(c) ? 200 : 0),
     });
     const { error, elapsed } = await underFakeTime(() =>
-      endpoints[2][1](api, { settings: { timeoutMs: 1000, pollIntervalMs: 100 } })
+      runImageVideo(api, { settings: { timeoutMs: 1000, pollIntervalMs: 100 } })
     );
-    expectRecoverable(error, api);
+    expectRecoverable(error, onlyProject(api));
     expect(elapsed).toBeGreaterThanOrEqual(1000);
     expect(elapsed).toBeLessThan(1200);
   });
+
+  test.each(endpoints)(
+    "%s: the shared deadline still applies to a download body that stalls",
+    async (_, run) => {
+      // Polling uses most of the 1000 ms deadline, then the download body never finishes.
+      const api = fakeApi({
+        statuses: [...Array(8).fill("rendering"), "complete"],
+        stallBody: () => () => {},
+      });
+      const { error, elapsed } = await underFakeTime(() =>
+        run(api, { settings: { timeoutMs: 1000, pollIntervalMs: 100 } })
+      );
+      expectRecoverable(error, onlyProject(api));
+      expect(elapsed).toBeLessThan(1200);
+    }
+  );
 
   test("timeoutMs also bounds a call whose caller passes its own signal", async () => {
     const api = fakeApi({ statuses: ["rendering"] });
@@ -308,14 +388,14 @@ describe("timing", () => {
         abortSignal: new AbortController().signal,
       })
     );
-    expectRecoverable(error, api);
+    expectRecoverable(error, onlyProject(api));
     expect(elapsed).toBeLessThan(600);
   });
 });
 
 describe("onProjectCreated", () => {
-  for (const [kind, run] of kinds) {
-    test(`receives the accepted ${kind} project before polling starts`, async () => {
+  for (const [endpoint, run, kind] of endpoints) {
+    test(`${endpoint}: receives the accepted ${kind} project before polling starts`, async () => {
       const api = fakeApi({ statuses: ["complete"] });
       const seen: { id: string; kind: string; pollsSoFar: number }[] = [];
       await run(api, {
@@ -325,7 +405,7 @@ describe("onProjectCreated", () => {
           },
         },
       });
-      expect(seen).toEqual([{ id: api.projects()[0].id, kind, pollsSoFar: 0 }]);
+      expect(seen).toEqual([{ id: onlyProject(api), kind, pollsSoFar: 0 }]);
     });
 
     test.each([
@@ -336,11 +416,26 @@ describe("onProjectCreated", () => {
         },
       ],
       ["rejects", async () => Promise.reject(new Error("database down"))],
-    ])(`a ${kind} save that %s names the project and stops before polling`, async (_, save) => {
+    ])(
+      `${endpoint}: a save that %s names the project and stops before polling`,
+      async (_, save) => {
+        const api = fakeApi();
+        const error = await rejection(run(api, { settings: { onProjectCreated: save } }));
+        expectRecoverable(error, onlyProject(api));
+        expect(api.polls()).toHaveLength(0);
+      }
+    );
+
+    test(`${endpoint}: a save that never finishes is bounded by timeoutMs`, async () => {
       const api = fakeApi();
-      const error = await rejection(run(api, { settings: { onProjectCreated: save } }));
-      expectRecoverable(error, api);
+      const { error, elapsed } = await underFakeTime(() =>
+        run(api, {
+          settings: { timeoutMs: 1000, onProjectCreated: () => new Promise<void>(() => {}) },
+        })
+      );
+      expectRecoverable(error, onlyProject(api));
       expect(api.polls()).toHaveLength(0);
+      expect(elapsed).toBeLessThan(1200);
     });
   }
 
@@ -368,8 +463,8 @@ describe("onProjectCreated", () => {
 });
 
 describe("custom messages", () => {
-  test.each(kinds)(
-    "a formatMessage that throws still names the accepted %s project",
+  test.each(endpoints)(
+    "%s: a formatMessage that throws still names the accepted project",
     async (_, run) => {
       const api = fakeApi({ statuses: ["error"] });
       const error = await rejection(
@@ -381,25 +476,49 @@ describe("custom messages", () => {
           },
         })
       );
-      expectRecoverable(error, api);
+      expectRecoverable(error, onlyProject(api));
     }
   );
 
-  test("formatMessage receives each message and its values", async () => {
+  test("formatMessage translates errors, including the recovery guidance", async () => {
+    const api = fakeApi({ statuses: ["error"] });
+    const seen: { id?: string; values?: Record<string, string | number> }[] = [];
+    const error = await rejection(
+      runImage(api, {
+        settings: {
+          formatMessage: (message, values) => {
+            seen.push({ id: message.id, values });
+            const text = message.defaultMessage.replace(/\{(\w+)\}/g, (_, k) =>
+              String(values?.[k])
+            );
+            return `[t] ${text}`;
+          },
+        },
+      })
+    );
+    const projectId = onlyProject(api);
+    expect((error as Error).message).toMatch(/^\[t\] /);
+    expect((error as Error).message).toContain(projectId);
+    expect(seen).toContainEqual(
+      expect.objectContaining({ values: expect.objectContaining({ projectId }) })
+    );
+  });
+
+  test("formatMessage receives the HTTP status of a rejected submission", async () => {
     const api = fakeApi({ createStatus: 402 });
     const seen: unknown[] = [];
     const error = await rejection(
       runImage(api, {
         settings: {
           formatMessage: (message, values) => {
-            seen.push({ id: message.id, values });
-            return `translated: ${message.defaultMessage}`;
+            seen.push(values);
+            return `[t] ${message.defaultMessage}`;
           },
         },
       })
     );
-    expect((error as Error).message).toMatch(/^translated: /);
-    expect(seen).toContainEqual(expect.objectContaining({ values: { status: 402 } }));
+    expect((error as Error).message).toMatch(/^\[t\] /);
+    expect(seen).toContainEqual({ status: 402 });
   });
 });
 
@@ -407,7 +526,7 @@ describe("credentials and error contents", () => {
   const key = "mh_test_KEY_8f2a91";
 
   test.each(endpoints)(
-    "%s: the key only goes to the API, never to storage in any header, URL or body",
+    "%s: the key only goes to the API, never off-origin in any header, URL or body",
     async (_, run) => {
       const api = fakeApi();
       await run(api, { settings: { apiKey: key } });
@@ -426,34 +545,61 @@ describe("credentials and error contents", () => {
     }
   );
 
-  test.each(kinds)("%s: custom headers reach the API but not storage", async (_, run) => {
-    const api = fakeApi();
-    const headers = { "X-Trace-Id": "trace-1" };
-    if (run === runImage)
-      await generateImage({ model: api.provider().image(), prompt: "Mug", headers, maxRetries: 0 });
-    else
-      await generateVideo({
-        model: api.provider().video(),
-        prompt: "Waves",
-        headers,
-        maxRetries: 0,
+  test.each(endpoints)(
+    "%s: a caller's Authorization header can't replace the configured key",
+    async (_, run) => {
+      const api = fakeApi();
+      await run(api, {
+        settings: { apiKey: key },
+        headers: { authorization: "Bearer someone-elses-key" },
       });
+      const apiCalls = api.calls.filter((c) => new URL(c.url).origin === API);
+      expect(apiCalls.length).toBeGreaterThan(1);
+      for (const call of apiCalls) expect(call.headers.get("Authorization")).toBe(`Bearer ${key}`);
+      for (const call of api.offOrigin()) expect(call.headers.has("Authorization")).toBe(false);
+    }
+  );
+
+  test.each(endpoints)("%s: custom headers reach the API but not storage", async (_, run) => {
+    const api = fakeApi();
+    await run(api, { headers: { "X-Trace-Id": "trace-1" } });
     for (const call of [...api.generations(), ...api.polls()])
       expect(call.headers.get("X-Trace-Id")).toBe("trace-1");
     expect(api.polls().length).toBeGreaterThan(0);
     for (const call of api.offOrigin()) expect(call.headers.has("X-Trace-Id")).toBe(false);
   });
 
-  test.each<[string, FakeApiOptions]>([
-    ["a rejected submission", { createStatus: 400 }],
-    ["a failed submission", { createStatus: 500 }],
-    ["a failed poll", { projectStatus: 500 }],
-    ["a failed download", { statuses: ["complete"], downloadStatus: 403 }],
-  ])("%s never echoes the response body", async (_, options) => {
-    const secret = "signed-url?X-Goog-Signature=secret123";
-    const api = fakeApi({ ...options, errorBody: secret });
-    const error = await rejection(runImage(api, { maxRetries: 0 }));
-    expect(String((error as Error).message)).not.toContain("secret123");
+  const secret = "signed-url?X-Goog-Signature=SECRET_123";
+  test.each<[string, Run, FakeApiOptions]>([
+    ["a rejected submission", runImage, { createStatus: 400 }],
+    ["a failed submission", runImage, { createStatus: 500 }],
+    ["a failed poll", runImage, { projectStatus: 500 }],
+    ["a failed download", runImage, { statuses: ["complete"], downloadStatus: 403 }],
+    ["a failed upload-URL request", runImageVideo, { uploadUrlsStatus: 500 }],
+    ["a failed upload", runImageVideo, { uploadStatus: 403 }],
+  ])("%s never echoes the JSON error message", async (_, run, options) => {
+    const api = fakeApi({ ...options, errorMessage: secret });
+    const error = await rejection(run(api, { maxRetries: 0 }));
+    expect(String((error as Error).message)).not.toContain("SECRET_123");
+  });
+
+  test.each<[string, (c: { url: string; method: string }) => boolean]>([
+    ["the upload-URL request", (c) => c.url.endsWith("/files/upload-urls")],
+    ["the upload", (c) => c.method === "PUT"],
+    ["the download", (c) => c.method === "GET" && c.url.startsWith(STORAGE)],
+    ["a poll", (c) => /-projects\//.test(c.url)],
+  ])("a fetch error on %s never echoes its message", async (_, match) => {
+    const api = fakeApi({ statuses: ["complete"] });
+    const fetch: typeof globalThis.fetch = async (input, init) => {
+      const request = new Request(input, init);
+      if (match({ url: request.url, method: request.method }))
+        throw new TypeError(`connect failed for ${request.url} with ${key}`);
+      return api.fetch(input, init);
+    };
+    const error = await rejection(runImageVideo(api, { settings: { apiKey: key, fetch } }));
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).not.toContain(key);
+    expect((error as Error).message).not.toContain("Signature");
   });
 
   test("the API key never appears in error messages", async () => {

@@ -1,6 +1,8 @@
 import { experimental_generateVideo as generateVideo } from "ai";
 import { describe, expect, test } from "vitest";
-import { API, fakeApi, png, UPLOAD_URL } from "./fake-api.js";
+import { API, fakeApi, png, STORAGE } from "./fake-api.js";
+
+const signedUpload = `${STORAGE}/uploads/input-1.png?X-Goog-Signature=upload-1`;
 
 const base64Png = Buffer.from(png).toString("base64");
 
@@ -124,7 +126,8 @@ describe("image-to-video request", () => {
     expect(api.calls[0].url).toBe(`${API}/v1/files/upload-urls`);
     expect(api.calls[0].body).toEqual({ items: [{ type: "image", extension: "png" }] });
     const uploads = api.storage().filter((c) => c.method === "PUT");
-    expect(uploads.map((c) => c.url)).toEqual([UPLOAD_URL]);
+    expect(uploads.map((c) => c.url)).toEqual([signedUpload]);
+    expect(uploads[0].headers.get("Content-Type") ?? "").not.toMatch(/json/);
     expect(uploads[0].body).toEqual(png);
     expect(api.generations()[0].url).toBe(`${API}/v1/image-to-video`);
     expect(api.generations()[0].body).toEqual({
@@ -132,7 +135,7 @@ describe("image-to-video request", () => {
       end_seconds: 1,
       resolution: "480p",
       style: { prompt: "Animate" },
-      assets: { image_file_path: "api-assets/test/input.png" },
+      assets: { image_file_path: "api-assets/test/input-1.png" },
     });
   });
 
@@ -144,7 +147,7 @@ describe("image-to-video request", () => {
       maxRetries: 0,
     });
     expect(api.storage().find((c) => c.method === "PUT")!.body).toEqual(png);
-    expect(api.generations()[0].body.assets.image_file_path).toBe("api-assets/test/input.png");
+    expect(api.generations()[0].body.assets.image_file_path).toBe("api-assets/test/input-1.png");
   });
 
   test("uploads base64 image data passed to the model directly", async () => {
@@ -165,6 +168,34 @@ describe("image-to-video request", () => {
       videoCall({ image: { type: "file", mediaType, data: png } })
     );
     expect(api.calls[0].body).toEqual({ items: [{ type: "image", extension }] });
+  });
+
+  test("each job uploads to its own signed URL and sends its own asset path", async () => {
+    const api = fakeApi({ statuses: ["complete"] });
+    const provider = api.provider();
+    const second = new Uint8Array([...png]);
+    await generateVideo({
+      model: provider.video(),
+      prompt: { image: png, text: "One" },
+      maxRetries: 0,
+    });
+    await generateVideo({
+      model: provider.video(),
+      prompt: { image: second, text: "Two" },
+      maxRetries: 0,
+    });
+    const [first, next] = api.uploads();
+    expect(first.url).not.toBe(next.url);
+    expect(
+      api
+        .storage()
+        .filter((c) => c.method === "PUT")
+        .map((c) => c.url)
+    ).toEqual([first.url, next.url]);
+    expect(api.generations().map((c) => c.body.assets.image_file_path)).toEqual([
+      first.filePath,
+      next.filePath,
+    ]);
   });
 
   test("sends an HTTPS image URL directly, without downloading or uploading it", async () => {
@@ -229,21 +260,42 @@ describe("a failed upload never starts a paid job", () => {
     expect(api.generations()).toHaveLength(0);
   });
 
+  test("an upload-URL request that fails", async () => {
+    const api = fakeApi({ uploadUrlsStatus: 500 });
+    await expect(
+      generateVideo({
+        model: api.provider().video(),
+        prompt: { image: png, text: "Animate" },
+        maxRetries: 3,
+      })
+    ).rejects.toThrow();
+    expect(api.uploadUrlRequests()).toHaveLength(1);
+    expect(api.offOrigin()).toHaveLength(0);
+    expect(api.generations()).toHaveLength(0);
+  });
+
+  const item = (overrides: Record<string, unknown>) => ({
+    items: [
+      {
+        upload_url: signedUpload,
+        file_path: "api-assets/x.png",
+        expires_at: "2099-01-01T00:00:00Z",
+        ...overrides,
+      },
+    ],
+  });
   test.each([
     ["no items", { items: [] }],
-    ["no file path", { items: [{ upload_url: UPLOAD_URL, expires_at: "2099-01-01T00:00:00Z" }] }],
-    ["no upload URL", { items: [{ file_path: "api-assets/x.png", expires_at: "2099-01-01" }] }],
+    ["no file path", item({ file_path: undefined })],
+    ["a numeric file path", item({ file_path: 123 })],
+    ["an object file path", item({ file_path: {} })],
+    ["a blank file path", item({ file_path: "    " })],
+    ["no upload URL", item({ upload_url: undefined })],
+    ["a non-string upload URL", item({ upload_url: 42 })],
+    ["a plain-HTTP upload URL", item({ upload_url: signedUpload.replace("https:", "http:") })],
     [
-      "a plain-HTTP upload URL",
-      {
-        items: [
-          {
-            upload_url: UPLOAD_URL.replace("https:", "http:"),
-            file_path: "api-assets/x.png",
-            expires_at: "2099-01-01T00:00:00Z",
-          },
-        ],
-      },
+      "an upload URL with embedded credentials",
+      item({ upload_url: signedUpload.replace("https://", "https://user:pass@") }),
     ],
   ])("an upload-URL response with %s", async (_, uploadUrlsBody) => {
     const api = fakeApi({ uploadUrlsBody });
@@ -254,8 +306,22 @@ describe("a failed upload never starts a paid job", () => {
         maxRetries: 0,
       })
     ).rejects.toThrow();
-    expect(api.storage()).toHaveLength(0);
+    expect(api.uploadUrlRequests()).toHaveLength(1);
+    expect(api.offOrigin()).toHaveLength(0);
     expect(api.generations()).toHaveLength(0);
+  });
+
+  test.each([
+    ["empty bytes", new Uint8Array(0)],
+    ["an empty base64 string", ""],
+  ])("an input image with %s", async (_, data) => {
+    const api = fakeApi();
+    await expect(
+      api.provider().video().doGenerate!(
+        videoCall({ image: { type: "file", mediaType: "image/png", data } })
+      )
+    ).rejects.toThrow();
+    expect(api.calls).toHaveLength(0);
   });
 });
 
@@ -327,6 +393,28 @@ describe("video validation happens before any request", () => {
       { inputReferences: [{ type: "file", mediaType: "image/png", data: png }] },
     ],
     ["more than one video", { n: 2 }],
+    [
+      "frame images alongside an input image",
+      {
+        image: { type: "file", mediaType: "image/png", data: png },
+        frameImages: [{ type: "file", mediaType: "image/png", data: png }],
+      },
+    ],
+    [
+      "reference inputs alongside an input image",
+      {
+        image: { type: "file", mediaType: "image/png", data: png },
+        inputReferences: [{ type: "file", mediaType: "image/png", data: png }],
+      },
+    ],
+    [
+      "an image URL with an invalid duration",
+      { image: { type: "url", url: "https://example.com/i.png" }, duration: 0 },
+    ],
+    [
+      "an image URL with an invalid resolution",
+      { image: { type: "url", url: "https://example.com/i.png" }, resolution: "1600x900" },
+    ],
   ])("rejects %s when called directly", async (_, extra) => {
     const api = fakeApi();
     await expect(api.provider().video().doGenerate!(videoCall(extra))).rejects.toThrow();

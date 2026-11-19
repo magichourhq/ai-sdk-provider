@@ -1,9 +1,9 @@
+import { readFileSync } from "node:fs";
 import { crc32, deflateSync } from "node:zlib";
 import { createMagicHour, type MagicHourSettings } from "../src/index.js";
 
 export const API = "https://api.magichour.ai";
 export const STORAGE = "https://storage.example";
-export const UPLOAD_URL = `${STORAGE}/uploads/input.png?X-Goog-Signature=upload-signature`;
 
 function pngChunk(type: string, data: Uint8Array): Buffer {
   const head = Buffer.alloc(8);
@@ -26,12 +26,14 @@ export function makePng(red: number, green = 0, blue = 0): Uint8Array {
   );
 }
 
-/** A well-formed MP4 box sequence (ftyp, then a free box that makes each file unique). */
+// A playable one-frame 16x16 H.264 MP4 (made with ffmpeg).
+const tinyMp4 = readFileSync(new URL("./fixtures/tiny.mp4", import.meta.url));
+
+/** A playable MP4, made unique with a trailing `free` box holding the marker. */
 export function makeMp4(marker: number): Uint8Array {
-  return new Uint8Array([
-    ...[0, 0, 0, 24, ...Buffer.from("ftypisom"), 0, 0, 2, 0, ...Buffer.from("isommp42")],
-    ...[0, 0, 0, 9, ...Buffer.from("free"), marker],
-  ]);
+  return new Uint8Array(
+    Buffer.concat([tinyMp4, Buffer.from([0, 0, 0, 9]), Buffer.from("free"), Buffer.from([marker])])
+  );
 }
 
 export const png = makePng(255, 0, 0);
@@ -41,6 +43,7 @@ export type Call = {
   method: string;
   headers: Headers;
   redirect: RequestRedirect;
+  credentials: RequestCredentials;
   /** Parsed JSON for JSON requests, otherwise the raw body bytes. */
   body: any;
 };
@@ -53,17 +56,21 @@ export type Project = {
   bytes: Uint8Array;
 };
 
+export type Upload = { url: string; filePath: string; bytes?: Uint8Array };
+
 export type FakeApiOptions = {
   /** Statuses returned by successive polls of each project. The last one repeats. */
   statuses?: string[];
+  /** Per-project statuses, by acceptance order starting at 1. Overrides `statuses`. */
+  statusesFor?: (n: number) => string[] | undefined;
   /** HTTP status for generation requests. Anything but 200 rejects the job. */
   createStatus?: number;
-  /** Response body for accepted generation requests. */
-  createBody?: (n: number) => unknown;
+  /** Raw response for accepted generation requests, replacing the normal one. */
+  createResponse?: (n: number) => Response | undefined;
   /** Makes generation requests fail like a dropped connection. */
   createNetworkError?: boolean;
-  /** Answers generation requests with a 307 redirect to the same endpoint. */
-  createRedirect?: boolean;
+  /** Answers matching requests with a 307 to the returned URL. */
+  redirect?: (call: Call) => string | undefined;
   /** HTTP status for project polls. */
   projectStatus?: number;
   /** The `error` object on failed projects. */
@@ -71,18 +78,22 @@ export type FakeApiOptions = {
   /** Overrides the downloads listed on a complete project. */
   downloads?: (project: Project) => { url: string; expires_at: string }[];
   creditsCharged?: number;
-  /** HTTP status for media downloads. */
+  /** HTTP status for media downloads. 204 sends no body. */
   downloadStatus?: number;
+  /** Serves downloads with an empty HTTP 200 body. */
+  emptyDownload?: boolean;
+  /** HTTP status for the upload-URL request. */
+  uploadUrlsStatus?: number;
   /** Response body for the upload-URL request. */
   uploadUrlsBody?: unknown;
   /** HTTP status for the upload PUT. */
   uploadStatus?: number;
-  /** Text included in error responses, to check it never reaches error messages. */
-  errorBody?: string;
+  /** Text in every error response's JSON `message`, to check it never reaches the caller. */
+  errorMessage?: string;
   /** Requests that never get a response until they're aborted. */
   hold?: (call: Call) => boolean;
-  /** Requests whose response headers arrive but whose body stalls until aborted. */
-  holdBody?: (call: Call) => boolean;
+  /** Downloads whose body stalls until aborted. Called on the first read of the body. */
+  stallBody?: (call: Call) => (() => void) | false;
   /** Milliseconds to wait before answering a request (uses setTimeout, so fake timers apply). */
   delay?: (call: Call) => number;
 };
@@ -121,30 +132,39 @@ const generationKinds: Record<string, "image" | "video"> = {
 export function isGeneration(call: Call): boolean {
   return (
     call.method === "POST" &&
-    call.url.startsWith(`${API}/`) &&
+    new URL(call.url).origin === API &&
     new URL(call.url).pathname in generationKinds
   );
 }
 
+function isJson(headers: Headers): boolean {
+  return headers.get("Content-Type")?.split(";")[0].trim().toLowerCase() === "application/json";
+}
+
 /**
  * A strict stand-in for the Magic Hour API and its signed-URL storage. It only answers the exact
- * method, route and media type the real API accepts, keeps separate state per project, and
- * follows real `fetch` semantics for aborts and redirects.
+ * method, route and media type the real API accepts, keeps separate state per project and per
+ * upload, sends spec-shaped JSON errors, and follows real `fetch` semantics for aborts and
+ * redirects.
  */
 export function fakeApi(options: FakeApiOptions = {}) {
   const calls: Call[] = [];
-  const projects = new Map<string, Project & { polls: number }>();
-  const statuses = options.statuses ?? ["queued", "rendering", "complete"];
+  const projects = new Map<string, Project & { polls: number; statuses: string[] }>();
+  const uploads: Upload[] = [];
 
   function error(status: number): Response {
-    return new Response(options.errorBody ?? `{"message":"HTTP ${status}"}`, { status });
+    if (status === 204) return new Response(null, { status });
+    return Response.json(
+      { code: `http_${status}`, message: options.errorMessage ?? `Request failed (${status})` },
+      { status }
+    );
   }
 
   function accept(path: string): Response {
     if (options.createStatus && options.createStatus !== 200) return error(options.createStatus);
     const n = projects.size + 1;
-    const custom = options.createBody?.(n);
-    if (custom !== undefined) return Response.json(custom);
+    const custom = options.createResponse?.(n);
+    if (custom) return custom;
     const kind = generationKinds[path];
     const id = `${kind}-${n}-${(n * 7919).toString(36)}`;
     const extension = kind === "image" ? "png" : "mp4";
@@ -154,43 +174,67 @@ export function fakeApi(options: FakeApiOptions = {}) {
       url: `${STORAGE}/outputs/${id}.${extension}?X-Goog-Signature=signature-${n}&X-Goog-Expires=86400`,
       bytes: kind === "image" ? makePng(n * 40, 255 - n * 40, n) : makeMp4(n),
       polls: 0,
+      statuses: options.statusesFor?.(n) ?? options.statuses ?? ["queued", "rendering", "complete"],
     });
-    return Response.json({ id, credits_charged: 5 });
+    // Submission reports an estimate; the project's charge comes from polling.
+    return Response.json({ id, credits_charged: 1 });
   }
 
-  async function respond(call: Call, request: Request): Promise<Response> {
+  async function respond(call: Call, signal: AbortSignal): Promise<Response> {
     const { url, method } = call;
-    const path = url.startsWith(`${API}/`) ? new URL(url).pathname : "";
-    const json = call.headers.get("Content-Type")?.startsWith("application/json");
+    const origin = new URL(url).origin;
+    const path = new URL(url).pathname;
 
-    if (url.startsWith(`${STORAGE}/`)) {
-      if (method === "PUT" && url === UPLOAD_URL)
-        return new Response(null, { status: options.uploadStatus ?? 200 });
+    if (origin === STORAGE) {
+      if (method === "PUT") {
+        const upload = uploads.find((u) => u.url === url && !u.bytes);
+        if (!upload) return error(403); // unknown or already used signed URL
+        if (options.uploadStatus && options.uploadStatus !== 200)
+          return error(options.uploadStatus);
+        upload.bytes = call.body;
+        return new Response(null, { status: 200 });
+      }
       const project = [...projects.values()].find((p) => p.url === url);
       if (method !== "GET" || !project) return error(404);
       const status = options.downloadStatus ?? 200;
       if (status !== 200) return error(status);
-      if (options.holdBody?.(call))
+      if (options.emptyDownload) return new Response(new Uint8Array(0));
+      const onStall = options.stallBody?.(call);
+      if (onStall) {
+        let started = false;
         return new Response(
           new ReadableStream({
-            start(controller) {
-              request.signal.addEventListener("abort", () =>
-                controller.error(abortError(request.signal))
-              );
+            pull(controller) {
+              if (!started) {
+                started = true;
+                signal.addEventListener("abort", () => controller.error(abortError(signal)));
+                onStall();
+              }
+              return new Promise(() => {});
             },
           })
         );
+      }
       return new Response(project.bytes as BodyInit);
     }
+    if (origin !== API) return error(404);
 
     if (method === "POST" && path === "/v1/files/upload-urls") {
-      if (!json) return error(415);
+      if (!isJson(call.headers)) return error(415);
+      if (options.uploadUrlsStatus && options.uploadUrlsStatus !== 200)
+        return error(options.uploadUrlsStatus);
+      const n = uploads.length + 1;
+      const upload = {
+        url: `${STORAGE}/uploads/input-${n}.png?X-Goog-Signature=upload-${n}`,
+        filePath: `api-assets/test/input-${n}.png`,
+      };
+      uploads.push(upload);
       return Response.json(
         options.uploadUrlsBody ?? {
           items: [
             {
-              upload_url: UPLOAD_URL,
-              file_path: "api-assets/test/input.png",
+              upload_url: upload.url,
+              file_path: upload.filePath,
               expires_at: "2099-01-01T00:00:00Z",
             },
           ],
@@ -199,14 +243,8 @@ export function fakeApi(options: FakeApiOptions = {}) {
     }
 
     if (method === "POST" && path in generationKinds) {
-      if (!json) return error(415);
+      if (!isJson(call.headers)) return error(415);
       if (options.createNetworkError) throw new TypeError("fetch failed");
-      if (options.createRedirect) {
-        // What the real fetch does with a 307 in each redirect mode.
-        if (call.redirect === "error") throw new TypeError("fetch failed: unexpected redirect");
-        if (call.redirect === "manual") return new Response(null, { status: 307 });
-        calls.push({ ...call }); // "follow" replays the POST, body included
-      }
       return accept(path);
     }
 
@@ -216,7 +254,7 @@ export function fakeApi(options: FakeApiOptions = {}) {
         return error(options.projectStatus);
       const project = projects.get(decodeURIComponent(match[2]));
       if (!project || project.kind !== match[1]) return error(404);
-      const status = statuses[Math.min(project.polls++, statuses.length - 1)];
+      const status = project.statuses[Math.min(project.polls++, project.statuses.length - 1)];
       return Response.json({
         id: project.id,
         status,
@@ -233,28 +271,43 @@ export function fakeApi(options: FakeApiOptions = {}) {
     return error(404);
   }
 
+  async function handle(call: Call, signal: AbortSignal): Promise<Response> {
+    calls.push(call);
+    if (options.hold?.(call)) return untilAborted(signal);
+    const delay = options.delay?.(call);
+    if (delay) await sleep(delay, signal);
+    const location = options.redirect?.(call);
+    if (location) {
+      // What the real fetch does with a 307 in each redirect mode.
+      if (call.redirect === "error") throw new TypeError("fetch failed: unexpected redirect");
+      if (call.redirect === "manual")
+        return new Response(null, { status: 307, headers: { Location: location } });
+      // "follow" repeats the request, body included, and drops credentials across origins.
+      const headers = new Headers(call.headers);
+      if (new URL(location).origin !== new URL(call.url).origin) headers.delete("Authorization");
+      return handle({ ...call, url: location, headers }, signal);
+    }
+    return respond(call, signal);
+  }
+
   const fetch: typeof globalThis.fetch = async (input, init) => {
     const request = new Request(input, init);
     // Like the real fetch, an already-aborted request never reaches the network.
     if (request.signal.aborted) throw abortError(request.signal);
     const bytes = new Uint8Array(await request.arrayBuffer());
-    const type = request.headers.get("Content-Type") ?? "";
     const call: Call = {
       url: request.url,
       method: request.method,
       headers: request.headers,
       redirect: request.redirect,
+      credentials: request.credentials,
       body: bytes.length
-        ? type.startsWith("application/json")
+        ? isJson(request.headers)
           ? JSON.parse(new TextDecoder().decode(bytes))
           : bytes
         : undefined,
     };
-    calls.push(call);
-    if (options.hold?.(call)) return untilAborted(request.signal);
-    const delay = options.delay?.(call);
-    if (delay) await sleep(delay, request.signal);
-    return respond(call, request);
+    return handle(call, request.signal);
   };
 
   return {
@@ -262,10 +315,13 @@ export function fakeApi(options: FakeApiOptions = {}) {
     fetch,
     /** Accepted projects, in order. */
     projects: () => [...projects.values()],
+    /** Upload URLs issued, in order, with the bytes PUT to each. */
+    uploads: () => uploads,
     /** Requests that start a paid generation. */
     generations: () => calls.filter(isGeneration),
     polls: () => calls.filter((c) => /-projects\//.test(c.url)),
-    storage: () => calls.filter((c) => c.url.startsWith(`${STORAGE}/`)),
+    uploadUrlRequests: () => calls.filter((c) => c.url === `${API}/v1/files/upload-urls`),
+    storage: () => calls.filter((c) => new URL(c.url).origin === STORAGE),
     /** Requests that leave https://api.magichour.ai. */
     offOrigin: () => calls.filter((c) => new URL(c.url).origin !== API),
     provider: (settings: MagicHourSettings = {}) =>

@@ -114,12 +114,17 @@ describe("models", () => {
 });
 
 describe("MagicHourError", () => {
-  test("is exported, never retryable, and carries the project ID", () => {
-    const error = new MagicHourError("Generation error.", "project-9");
+  test("is exported and is what generation failures throw", async () => {
+    const api = fakeApi({ statuses: ["error"] });
+    const error = await generateImage({
+      model: api.provider().image(),
+      prompt: "Mug",
+      maxRetries: 0,
+    }).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(MagicHourError);
     expect(error).toBeInstanceOf(Error);
-    expect(error.name).toBe("MagicHourError");
-    expect(error.isRetryable).toBe(false);
-    expect(error.projectId).toBe("project-9");
-    expect(error.message).toContain("project-9");
+    expect((error as MagicHourError).name).toBe("MagicHourError");
+    expect((error as MagicHourError).isRetryable).toBe(false);
+    expect((error as MagicHourError).projectId).toBe(api.projects()[0].id);
   });
 });
