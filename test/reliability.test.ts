@@ -1,3 +1,4 @@
+import { inspect } from "node:util";
 import { experimental_generateVideo as generateVideo, generateImage } from "ai";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { MagicHourError, type MagicHourSettings } from "../src/index.js";
@@ -88,8 +89,20 @@ function expectAcceptanceUnknown(error: unknown) {
   expect((error as Error).message).toMatch(/Acceptance is unknown/);
 }
 
+const isDownload = (c: Call) => c.method === "GET" && c.url.startsWith(STORAGE);
+const isPoll = (c: Call) => /-projects\//.test(c.url);
+
+/** Asserts the secret appears nowhere a caller or a log could see it, including causes. */
+function expectNoSecret(error: unknown, secret: string) {
+  expect(inspect(error, { depth: 10 })).not.toContain(secret);
+  for (let e: unknown = error, depth = 0; e && depth < 10; e = (e as Error).cause, depth++) {
+    expect(String((e as Error).message ?? e)).not.toContain(secret);
+    expect(String((e as Error).stack ?? "")).not.toContain(secret);
+  }
+}
+
 /** Runs a call to completion under fake timers and reports the virtual time it took. */
-async function underFakeTime(start: () => Promise<unknown>) {
+async function underFakeTime(start: () => Promise<unknown>, step = 5) {
   vi.useFakeTimers();
   const began = Date.now();
   let settled = false;
@@ -98,7 +111,7 @@ async function underFakeTime(start: () => Promise<unknown>) {
     (error: unknown) => ({ error })
   );
   outcome.finally(() => (settled = true));
-  for (let i = 0; i < 100_000 && !settled; i++) await vi.advanceTimersByTimeAsync(5);
+  for (let i = 0; i < 100_000 && !settled; i++) await vi.advanceTimersByTimeAsync(step);
   expect(settled).toBe(true);
   return { ...(await outcome), elapsed: Date.now() - began };
 }
@@ -153,6 +166,29 @@ describe("paid generations are never retried", () => {
       });
     });
   }
+
+  test.each(endpoints)(
+    "%s: a submission response that breaks partway leaves acceptance unknown",
+    async (_, run) => {
+      const api = fakeApi({ breakBody: isGeneration });
+      const error = await rejection(run(api));
+      expect(api.generations()).toHaveLength(1);
+      expectAcceptanceUnknown(error);
+    }
+  );
+
+  test.each(endpoints)(
+    "%s: a submission response whose body stalls is bounded by timeoutMs",
+    async (_, run) => {
+      const api = fakeApi({ stallBody: (c) => isGeneration(c) && (() => {}) });
+      const { error, elapsed } = await underFakeTime(() =>
+        run(api, { settings: { timeoutMs: 1000 } })
+      );
+      expect(api.generations()).toHaveLength(1);
+      expectAcceptanceUnknown(error);
+      expect(elapsed).toBeLessThan(1200);
+    }
+  );
 
   test.each<[string, () => Response]>([
     ["no project ID", () => Response.json({ credits_charged: 5 })],
@@ -234,6 +270,32 @@ describe("failures after acceptance name the accepted project", () => {
         expectRecoverable(error, api.projects()[1].id);
         expect((error as Error).message).not.toContain(api.projects()[0].id);
       });
+
+      test("when overlapping jobs finish out of order, the failure names its own project", async () => {
+        // Job 1 fails after job 2 has already succeeded.
+        const api = fakeApi({
+          statusesFor: (n) =>
+            n === 1 ? ["rendering", "rendering", "rendering", "error"] : ["complete"],
+        });
+        // The same settings object, so both jobs run through one provider.
+        const settings = { pollIntervalMs: 5 };
+        const first = rejection(run(api, { settings }));
+        await new Promise((resolve) => setImmediate(resolve));
+        await run(api, { settings });
+        const error = await first;
+        expect(api.projects()).toHaveLength(2);
+        expectRecoverable(error, api.projects()[0].id);
+        expect((error as Error).message).not.toContain(api.projects()[1].id);
+      });
+
+      test("a poll whose response body stalls names the project at the deadline", async () => {
+        const api = fakeApi({ stallBody: (c) => isPoll(c) && (() => {}) });
+        const { error, elapsed } = await underFakeTime(() =>
+          run(api, { settings: { timeoutMs: 1000 } })
+        );
+        expectRecoverable(error, onlyProject(api));
+        expect(elapsed).toBeLessThan(1200);
+      });
     });
 });
 
@@ -251,8 +313,6 @@ describe("cancellation", () => {
     });
     return { api, signal: controller.signal };
   }
-  const isPoll = (c: Call) => /-projects\//.test(c.url);
-
   test("an already-aborted signal sends nothing", async () => {
     const api = fakeApi();
     const controller = new AbortController();
@@ -288,7 +348,10 @@ describe("cancellation", () => {
 
     test(`${endpoint}: aborting while the download body streams names the project`, async () => {
       const controller = new AbortController();
-      const api = fakeApi({ statuses: ["complete"], stallBody: () => () => controller.abort() });
+      const api = fakeApi({
+        statuses: ["complete"],
+        stallBody: (c) => isDownload(c) && (() => controller.abort()),
+      });
       expectRecoverable(
         await rejection(run(api, { abortSignal: controller.signal })),
         onlyProject(api)
@@ -391,7 +454,7 @@ describe("timing", () => {
       // Polling uses most of the 1000 ms deadline, then the download body never finishes.
       const api = fakeApi({
         statuses: [...Array(8).fill("rendering"), "complete"],
-        stallBody: () => () => {},
+        stallBody: (c) => isDownload(c) && (() => {}),
       });
       const { error, elapsed } = await underFakeTime(() =>
         run(api, { settings: { timeoutMs: 1000, pollIntervalMs: 100 } })
@@ -401,14 +464,29 @@ describe("timing", () => {
     }
   );
 
-  test("without timeoutMs, a job that takes over a minute still succeeds", async () => {
-    // 14 polls 5 s apart finish after about 65 s, inside the 10-minute default deadline.
-    const api = fakeApi({ statuses: [...Array(13).fill("rendering"), "complete"] });
-    const { error, elapsed } = await underFakeTime(() =>
-      runImage(api, { settings: { pollIntervalMs: 5000 } })
+  test.each(endpoints)(
+    "%s: without timeoutMs, a job finishing just inside 10 minutes succeeds",
+    async (_, run) => {
+      // 20 polls 29 s apart complete at 551 s, inside the 600 s default deadline.
+      const api = fakeApi({ statuses: [...Array(19).fill("rendering"), "complete"] });
+      const { error, elapsed } = await underFakeTime(
+        () => run(api, { settings: { pollIntervalMs: 29_000 } }),
+        500
+      );
+      expect(error).toBeUndefined();
+      expect(elapsed).toBeGreaterThan(550_000);
+    }
+  );
+
+  test("without timeoutMs, a job still pending at 10 minutes names its project", async () => {
+    const api = fakeApi({ statuses: ["rendering"] });
+    const { error, elapsed } = await underFakeTime(
+      () => runTextVideo(api, { settings: { pollIntervalMs: 30_000 } }),
+      500
     );
-    expect(error).toBeUndefined();
-    expect(elapsed).toBeGreaterThan(60_000);
+    expectRecoverable(error, onlyProject(api));
+    expect(elapsed).toBeGreaterThanOrEqual(600_000);
+    expect(elapsed).toBeLessThan(631_000);
   });
 
   test("timeoutMs also bounds a call whose caller passes its own signal", async () => {
@@ -661,7 +739,7 @@ describe("credentials and error contents", () => {
   ])("%s never echoes the response", async (_, run, options) => {
     const api = fakeApi({ ...options, errorMessage: secret });
     const error = await rejection(run(api, { maxRetries: 0 }));
-    expect(String((error as Error).message)).not.toContain("SECRET_123");
+    expectNoSecret(error, "SECRET_123");
   });
 
   test.each<[string, (c: { url: string; method: string }) => boolean]>([
@@ -680,8 +758,8 @@ describe("credentials and error contents", () => {
     };
     const error = await rejection(runImageVideo(api, { settings: { apiKey: key, fetch } }));
     expect(error).toBeInstanceOf(Error);
-    expect((error as Error).message).not.toContain(key);
-    expect((error as Error).message).not.toContain("Signature");
+    expectNoSecret(error, key);
+    expectNoSecret(error, "Signature");
   });
 
   test("an API key that isn't a valid header value never appears in the error", async () => {

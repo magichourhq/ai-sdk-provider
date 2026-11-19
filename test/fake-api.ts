@@ -53,6 +53,8 @@ export type Call = {
 export type Project = {
   id: string;
   kind: "image" | "video";
+  /** The project type the API reports, from the creation route. */
+  type: "AI_IMAGE" | "TEXT_TO_VIDEO" | "IMAGE_TO_VIDEO";
   /** The signed URL its output is served from. */
   url: string;
   bytes: Uint8Array;
@@ -98,8 +100,12 @@ export type FakeApiOptions = {
   errorMessage?: string;
   /** Requests that never get a response until they're aborted. */
   hold?: (call: Call) => boolean;
-  /** Downloads whose body stalls until aborted. Called on the first read of the body. */
+  /** Responses whose body stalls until aborted, after the headers arrive. Called on first read. */
   stallBody?: (call: Call) => (() => void) | false;
+  /** Responses whose body breaks partway, like a connection reset after the headers. */
+  breakBody?: (call: Call) => boolean;
+  /** Sets the deprecated single `download` field on video projects to null. */
+  nullDownloadField?: boolean;
   /** Milliseconds to wait before answering a request (uses setTimeout, so fake timers apply). */
   delay?: (call: Call) => number;
 };
@@ -134,6 +140,11 @@ const generationKinds: Record<string, "image" | "video"> = {
   "/v1/text-to-video": "video",
   "/v1/image-to-video": "video",
 };
+const projectTypes = {
+  "/v1/ai-image-generator": "AI_IMAGE",
+  "/v1/text-to-video": "TEXT_TO_VIDEO",
+  "/v1/image-to-video": "IMAGE_TO_VIDEO",
+} as const;
 
 export function isGeneration(call: Call): boolean {
   return (
@@ -147,6 +158,38 @@ function isJson(headers: Headers): boolean {
   return headers.get("Content-Type")?.split(";")[0].trim().toLowerCase() === "application/json";
 }
 
+/** The same response with a different body. */
+function withBody(response: Response, body: ReadableStream<Uint8Array>): Response {
+  return new Response(body, { status: response.status, headers: response.headers });
+}
+
+function stalledBody(signal: AbortSignal, onStall: () => void): ReadableStream<Uint8Array> {
+  let started = false;
+  return new ReadableStream(
+    {
+      pull(controller) {
+        if (!started) {
+          started = true;
+          signal.addEventListener("abort", () => controller.error(abortError(signal)));
+          onStall();
+        }
+        return new Promise(() => {});
+      },
+    },
+    // Pull only when the consumer reads, not as soon as the response exists.
+    { highWaterMark: 0 }
+  );
+}
+
+function brokenBody(): ReadableStream<Uint8Array> {
+  return new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode('{"id": "'));
+      controller.error(new TypeError("terminated: other side closed"));
+    },
+  });
+}
+
 /**
  * A strict stand-in for the Magic Hour API and its signed-URL storage. It only answers the exact
  * method, route and media type the real API accepts, keeps separate state per project and per
@@ -157,6 +200,7 @@ export function fakeApi(options: FakeApiOptions = {}) {
   const calls: Call[] = [];
   const projects = new Map<string, Project & { polls: number; statuses: string[] }>();
   const uploads: Upload[] = [];
+  const providers = new WeakMap<MagicHourSettings, ReturnType<typeof createMagicHour>>();
 
   function error(status: number): Response {
     if (status === 204) return new Response(null, { status });
@@ -178,6 +222,7 @@ export function fakeApi(options: FakeApiOptions = {}) {
     projects.set(id, {
       id,
       kind,
+      type: projectTypes[path as keyof typeof projectTypes],
       // Real signatures contain percent-encoded characters that must reach storage unchanged.
       url: `${STORAGE}/outputs/${id}.${extension}?X-Goog-Signature=sig%2Bout%2F${n}%26x%3D&X-Goog-Expires=86400`,
       bytes: kind === "image" ? makePng(n * 40, 255 - n * 40, n) : makeMp4(n),
@@ -185,7 +230,11 @@ export function fakeApi(options: FakeApiOptions = {}) {
       statuses: options.statusesFor?.(n) ?? options.statuses ?? ["queued", "rendering", "complete"],
     });
     // Submission reports an estimate; the project's charge comes from polling.
-    return Response.json({ id, credits_charged: 1 });
+    return Response.json(
+      kind === "image"
+        ? { id, frame_cost: 1, credits_charged: 1 }
+        : { id, estimated_frame_cost: 1, credits_charged: 1 }
+    );
   }
 
   async function respond(call: Call, signal: AbortSignal): Promise<Response> {
@@ -207,26 +256,6 @@ export function fakeApi(options: FakeApiOptions = {}) {
       const status = options.downloadStatus ?? 200;
       if (status !== 200) return error(status);
       if (options.emptyDownload) return new Response(new Uint8Array(0));
-      const onStall = options.stallBody?.(call);
-      if (onStall) {
-        let started = false;
-        return new Response(
-          new ReadableStream(
-            {
-              pull(controller) {
-                if (!started) {
-                  started = true;
-                  signal.addEventListener("abort", () => controller.error(abortError(signal)));
-                  onStall();
-                }
-                return new Promise(() => {});
-              },
-            },
-            // Pull only when the consumer reads, not as soon as the response exists.
-            { highWaterMark: 0 }
-          )
-        );
-      }
       return new Response(project.bytes as BodyInit);
     }
     if (origin !== API) return error(404);
@@ -284,23 +313,24 @@ export function fakeApi(options: FakeApiOptions = {}) {
         status,
         created_at: "2026-11-19T00:00:00Z",
         enabled: true,
-        total_frame_cost: credits,
+        // Deprecated and different from the charge; it must never be reported as one.
+        total_frame_cost: credits * 10,
         credits_charged: credits,
         error: status === "error" ? (options.projectError ?? null) : null,
         downloads,
       };
       return Response.json(
         project.kind === "image"
-          ? { ...common, type: "AI_IMAGE", image_count: 1 }
+          ? { ...common, type: project.type, image_count: 1 }
           : {
               ...common,
-              type: "TEXT_TO_VIDEO",
+              type: project.type,
               width: 854,
               height: 480,
               start_seconds: 0,
               end_seconds: 5,
               fps: 24,
-              download: downloads[0] ?? null,
+              download: options.nullDownloadField ? null : (downloads[0] ?? null),
             }
       );
     }
@@ -312,6 +342,9 @@ export function fakeApi(options: FakeApiOptions = {}) {
     if (options.hold?.(call)) return untilAborted(signal);
     const delay = options.delay?.(call);
     if (delay) await sleep(delay, signal);
+    const onStall = options.stallBody?.(call);
+    if (onStall) return withBody(await respond(call, signal), stalledBody(signal, onStall));
+    if (options.breakBody?.(call)) return withBody(await respond(call, signal), brokenBody());
     const location = options.redirect?.(call);
     if (location) {
       // What the real fetch does with a 307 in each redirect mode.
@@ -360,7 +393,14 @@ export function fakeApi(options: FakeApiOptions = {}) {
     storage: () => calls.filter((c) => new URL(c.url).origin === STORAGE),
     /** Requests that leave https://api.magichour.ai. */
     offOrigin: () => calls.filter((c) => new URL(c.url).origin !== API),
-    provider: (settings: MagicHourSettings = {}) =>
-      createMagicHour({ apiKey: "test-key", fetch, pollIntervalMs: 0, ...settings }),
+    /** A provider for these settings. Passing the same settings object reuses the provider. */
+    provider(settings: MagicHourSettings = {}) {
+      let provider = providers.get(settings);
+      if (!provider) {
+        provider = createMagicHour({ apiKey: "test-key", fetch, pollIntervalMs: 0, ...settings });
+        providers.set(settings, provider);
+      }
+      return provider;
+    },
   };
 }

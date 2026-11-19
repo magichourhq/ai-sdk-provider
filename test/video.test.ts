@@ -171,6 +171,21 @@ describe("image-to-video request", () => {
     expect(api.uploads()[0].bytes).toEqual(data);
   });
 
+  test("uploads only the bytes of a view, not the rest of its buffer", async () => {
+    const api = fakeApi({ statuses: ["complete"] });
+    const padded = new Uint8Array([
+      ...Buffer.from("SENTINEL-BEFORE"),
+      ...png,
+      ...Buffer.from("SENTINEL-AFTER"),
+    ]);
+    const view = padded.subarray(15, 15 + png.length);
+    expect(view).toEqual(png);
+    await api.provider().video().doGenerate!(
+      videoCall({ image: { type: "file", mediaType: "image/png", data: view } })
+    );
+    expect(api.uploads()[0].bytes).toEqual(png);
+  });
+
   test.each([true, false])("sends audio: %s for image-to-video", async (generateAudio) => {
     const api = fakeApi({ statuses: ["complete"] });
     await generateVideo({
@@ -506,6 +521,46 @@ describe("video result", () => {
     expect(result.providerMetadata.magichour).toMatchObject({
       projectId: project.id,
       creditsCharged: 12,
+    });
+  });
+
+  test.each([
+    ["text-to-video", "Waves"],
+    ["image-to-video", { image: png, text: "Animate" }],
+  ] as const)("%s waits through draft, queued and rendering", async (_, prompt) => {
+    const api = fakeApi({ statuses: ["draft", "queued", "rendering", "complete"] });
+    const result = await generateVideo({ model: api.provider().video(), prompt, maxRetries: 0 });
+    expect(api.polls()).toHaveLength(4);
+    expect(result.video.uint8Array).toEqual(api.projects()[0].bytes);
+  });
+
+  test("uses the downloads list when the deprecated download field is null", async () => {
+    const api = fakeApi({ statuses: ["complete"], nullDownloadField: true });
+    const result = await generateVideo({
+      model: api.provider().video(),
+      prompt: "Waves",
+      maxRetries: 0,
+    });
+    expect(result.video.uint8Array).toEqual(api.projects()[0].bytes);
+  });
+
+  test("overlapping calls on one model each return their own project's output and metadata", async () => {
+    // The first job finishes last.
+    const api = fakeApi({
+      statusesFor: (n) =>
+        n === 1 ? ["rendering", "rendering", "rendering", "complete"] : ["complete"],
+    });
+    const model = api.provider({ pollIntervalMs: 5 }).video();
+    const results = await Promise.all([
+      model.doGenerate!(videoCall({ prompt: "First" })),
+      model.doGenerate!(videoCall({ prompt: "Second" })),
+    ]);
+    expect(api.projects()).toHaveLength(2);
+    results.forEach((result, i) => {
+      const projectId = (result.providerMetadata as any).magichour.projectId;
+      expect(projectId).toBe(api.projects()[i].id);
+      const video = result.videos[0] as { type: "binary"; data: Uint8Array };
+      expect(video.data).toEqual(api.projects()[i].bytes);
     });
   });
 
