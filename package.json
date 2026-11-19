@@ -27,6 +27,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "vitest run",
+    "test:live": "MAGIC_HOUR_LIVE=1 vitest run --coverage.enabled=false test/live.test.ts",
     "check": "tsc --noEmit -p tsconfig.test.json",
     "example": "tsx example.ts",
     "prepack": "yarn build"
@@ -37,6 +38,7 @@
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
+    "@vitest/coverage-v8": "^5.1.0",
     "ai": "^7.0.148",
     "tsx": "^4.20.0",
     "typescript": "^7.0.2",
