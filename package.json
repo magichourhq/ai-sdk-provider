@@ -1,6 +1,7 @@
 {
   "name": "@magichourhq/ai-sdk-provider",
   "version": "0.1.1",
+  "packageManager": "yarn@4.18.0",
   "description": "Magic Hour image and video provider for Vercel AI SDK",
   "type": "module",
   "license": "MIT",
@@ -29,16 +30,17 @@
     "test": "tsx --test test/*.test.ts",
     "check": "tsc --noEmit -p tsconfig.test.json",
     "example": "tsx example.ts",
-    "prepack": "npm run build"
+    "prepack": "yarn build"
   },
   "dependencies": {
-    "@ai-sdk/provider": "4.0.31"
+    "@ai-sdk/provider": "^4.0.31"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
-    "ai": "7.0.148",
+    "ai": "^7.0.148",
     "tsx": "^4.20.0",
-    "typescript": "^6.0.0"
+    "typescript": "^7.0.2",
+    "zod": "^4.6.7"
   },
   "peerDependencies": {
     "ai": "^7.0.148"
