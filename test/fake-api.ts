@@ -3,7 +3,8 @@ import { crc32, deflateSync } from "node:zlib";
 import { createMagicHour, type MagicHourSettings } from "../src/index.js";
 
 export const API = "https://api.magichour.ai";
-export const STORAGE = "https://storage.example";
+// Signed media URLs live on a Magic Hour host, so credential checks must use the exact API origin.
+export const STORAGE = "https://videos.magichour.ai";
 
 function pngChunk(type: string, data: Uint8Array): Buffer {
   const head = Buffer.alloc(8);
@@ -102,7 +103,7 @@ export type FakeApiOptions = {
   hold?: (call: Call) => boolean;
   /** Responses whose body stalls until aborted, after the headers arrive. Called on first read. */
   stallBody?: (call: Call) => (() => void) | false;
-  /** Responses whose body breaks partway, like a connection reset after the headers. */
+  /** Responses whose body breaks partway, like a connection reset after some of the data. */
   breakBody?: (call: Call) => boolean;
   /** Sets the deprecated single `download` field on video projects to null. */
   nullDownloadField?: boolean;
@@ -189,11 +190,14 @@ function stalledBody(signal: AbortSignal, onStall: () => void): ReadableStream<U
   );
 }
 
-function brokenBody(): ReadableStream<Uint8Array> {
+/** Sends the first bytes of the real body, then fails like a reset connection. */
+function brokenBody(prefix: Uint8Array): ReadableStream<Uint8Array> {
+  let sent = false;
   return new ReadableStream({
-    start(controller) {
-      controller.enqueue(new TextEncoder().encode('{"id": "'));
-      controller.error(new TypeError("terminated: other side closed"));
+    pull(controller) {
+      if (sent) return controller.error(new TypeError("terminated: other side closed"));
+      sent = true;
+      controller.enqueue(prefix);
     },
   });
 }
@@ -354,7 +358,11 @@ export function fakeApi(options: FakeApiOptions = {}) {
     if (delay) await sleep(delay, signal);
     const onStall = options.stallBody?.(call);
     if (onStall) return withBody(await respond(call, signal), stalledBody(signal, onStall));
-    if (options.breakBody?.(call)) return withBody(await respond(call, signal), brokenBody());
+    if (options.breakBody?.(call)) {
+      const response = await respond(call, signal);
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      return withBody(response, brokenBody(bytes.subarray(0, Math.min(16, bytes.length >> 1))));
+    }
     const location = options.redirect?.(call);
     if (location) {
       // What the real fetch does with a 307 in each redirect mode.

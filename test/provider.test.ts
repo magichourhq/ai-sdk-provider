@@ -41,6 +41,25 @@ describe("API key", () => {
     ]);
   });
 
+  test("a key rotated mid-job applies to the next call, not to the running job", async () => {
+    const api = fakeApi({ statuses: ["rendering", "complete"] });
+    const model = createMagicHour({
+      fetch: api.fetch,
+      pollIntervalMs: 0,
+      onProjectCreated: () => {
+        vi.stubEnv("MAGIC_HOUR_API_KEY", "new-key");
+      },
+    }).image();
+    vi.stubEnv("MAGIC_HOUR_API_KEY", "old-key");
+    await generateImage({ model, prompt: "Mug", maxRetries: 0 });
+    const [first] = api.projects();
+    for (const call of api.polls().filter((c) => c.url.endsWith(`/${first.id}`)))
+      expect(call.headers.get("Authorization")).toBe("Bearer old-key");
+    expect(api.generations()[0].headers.get("Authorization")).toBe("Bearer old-key");
+    await generateImage({ model, prompt: "Mug", maxRetries: 0 });
+    expect(api.generations()[1].headers.get("Authorization")).toBe("Bearer new-key");
+  });
+
   test("falls back to MAGIC_HOUR_API_KEY at call time", async () => {
     const api = fakeApi({ statuses: ["complete"] });
     const provider = createMagicHour({ fetch: api.fetch, pollIntervalMs: 0 });

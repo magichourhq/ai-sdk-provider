@@ -1,7 +1,7 @@
 import { inspect } from "node:util";
 import { experimental_generateVideo as generateVideo, generateImage } from "ai";
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { MagicHourError, type MagicHourSettings } from "../src/index.js";
+import { createMagicHour, MagicHourError, type MagicHourSettings } from "../src/index.js";
 import {
   API,
   type Call,
@@ -205,6 +205,7 @@ describe("paid generations are never retried", () => {
   test.each<[string, () => Response]>([
     ["no project ID", () => Response.json({ credits_charged: 5 })],
     ["an empty project ID", () => Response.json({ id: "" })],
+    ["a blank project ID", () => Response.json({ id: "   " })],
     ["a non-string project ID", () => Response.json({ id: 42 })],
     ["a JSON string body", () => Response.json("project-1")],
     [
@@ -216,7 +217,11 @@ describe("paid generations are never retried", () => {
     ],
   ])("an accepted response with %s fails without resubmitting", async (_, createResponse) => {
     const api = fakeApi({ createResponse });
-    const error = await rejection(runImage(api));
+    const saved: unknown[] = [];
+    const error = await rejection(
+      runImage(api, { settings: { onProjectCreated: (project) => void saved.push(project) } })
+    );
+    expect(saved).toEqual([]);
     expect(error).toBeInstanceOf(MagicHourError);
     // The server may have charged, so the caller must check before submitting again.
     expect((error as MagicHourError).projectId).toBeUndefined();
@@ -253,6 +258,10 @@ describe("failures after acceptance name the accepted project", () => {
     ["a poll that returns null", { pollResponse: () => Response.json(null) }],
     ["a failed download", { statuses: ["complete"], downloadStatus: 403 }],
     ["a download with no content (204)", { statuses: ["complete"], downloadStatus: 204 }],
+    [
+      "a download that breaks partway",
+      { statuses: ["complete"], breakBody: (c) => c.method === "GET" && c.url.startsWith(STORAGE) },
+    ],
     ["an empty download (200)", { statuses: ["complete"], emptyDownload: true }],
   ];
 
@@ -455,6 +464,8 @@ describe("cancellation", () => {
       expectRecoverable(error, onlyProject(api));
       expect(elapsed).toBeLessThan(1000);
       expect(api.polls()).toHaveLength(1);
+      // No poll timer may outlive the call; in Node it would keep the process running.
+      expect(vi.getTimerCount()).toBe(0);
     });
   }
 
@@ -542,6 +553,35 @@ describe("timing", () => {
     await vi.advanceTimersByTimeAsync(1000);
     await run;
     expect(api.polls()).toHaveLength(3);
+  });
+
+  test("an image-to-video submission doesn't get a fresh deadline after a slow upload", async () => {
+    const api = fakeApi({
+      delay: (c) => (c.method === "PUT" ? 300 : 0),
+      hold: isGeneration,
+    });
+    const { error, elapsed } = await underFakeTime(() =>
+      runImageVideo(api, { settings: { timeoutMs: 500 } })
+    );
+    expectAcceptanceUnknown(error);
+    expect(api.generations()).toHaveLength(1);
+    expect(elapsed).toBeLessThan(600);
+  });
+
+  test("polls every 2 seconds by default", async () => {
+    const api = fakeApi({ statuses: ["rendering", "rendering", "complete"] });
+    vi.useFakeTimers();
+    // Not api.provider(), which sets pollIntervalMs: 0 to keep other tests fast.
+    const model = createMagicHour({ apiKey: "test-key", fetch: api.fetch }).image();
+    const run = generateImage({ model, prompt: "Mug", maxRetries: 0 });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(api.polls()).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1999);
+    expect(api.polls()).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(api.polls()).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(2000);
+    await run;
   });
 
   test("timeoutMs is one deadline across upload, submission and waiting", async () => {
@@ -934,7 +974,7 @@ describe("credentials and error contents", () => {
       {
         statuses: ["complete"],
         downloads: () => [
-          { url: "http://storage.example/out.png?sig=URL_SECRET_42", expires_at: "2099-01-01" },
+          { url: "http://videos.magichour.ai/out.png?sig=URL_SECRET_42", expires_at: "2099-01-01" },
         ],
       },
     ],
@@ -945,7 +985,7 @@ describe("credentials and error contents", () => {
         uploadUrlsBody: {
           items: [
             {
-              upload_url: "http://storage.example/in.png?sig=URL_SECRET_42",
+              upload_url: "http://videos.magichour.ai/in.png?sig=URL_SECRET_42",
               file_path: "api-assets/x.png",
               expires_at: "2099-01-01T00:00:00Z",
             },
@@ -960,7 +1000,7 @@ describe("credentials and error contents", () => {
         uploadUrlsBody: {
           items: [
             {
-              upload_url: "https://user:URL_SECRET_42@storage.example/in.png",
+              upload_url: "https://user:URL_SECRET_42@videos.magichour.ai/in.png",
               file_path: "api-assets/x.png",
               expires_at: "2099-01-01T00:00:00Z",
             },

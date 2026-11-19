@@ -150,6 +150,24 @@ describe("image-to-video request", () => {
     expect(api.generations()[0].body.assets.image_file_path).toBe("api-assets/test/input-1.png");
   });
 
+  test.each([
+    ["PNG bytes declared as JPEG", "image/jpeg", png],
+    ["WebP bytes declared as JPEG", "image/jpeg", webp],
+    ["JPEG bytes declared as WebP", "image/webp", jpeg],
+    [
+      "a WAVE file declared as WebP",
+      "image/webp",
+      new Uint8Array([...Buffer.from("RIFF"), 36, 0, 0, 0, ...Buffer.from("WAVEfmt ")]),
+    ],
+    ["JPEG bytes declared as PNG", "image/png", jpeg],
+  ])("rejects %s before any request", async (_, mediaType, data) => {
+    const api = fakeApi();
+    await expect(
+      api.provider().video().doGenerate!(videoCall({ image: { type: "file", mediaType, data } }))
+    ).rejects.toThrow();
+    expect(api.calls).toHaveLength(0);
+  });
+
   test("a data URL whose bytes aren't the declared image type starts nothing", async () => {
     const api = fakeApi();
     await expect(
@@ -277,6 +295,33 @@ describe("image-to-video request", () => {
     expect(textJob.body).not.toHaveProperty("assets");
     expect(textJob.body.style).toEqual({ prompt: "Waves" });
     expect(api.uploadUrlRequests()).toHaveLength(1);
+  });
+
+  test("an image job whose upload finishes after a text job on the same model keeps its route", async () => {
+    let releaseUpload!: () => void;
+    const upload = new Promise<void>((resolve) => (releaseUpload = resolve));
+    const api = fakeApi({
+      statuses: ["complete"],
+      gate: (c) => (c.method === "PUT" ? upload : undefined),
+    });
+    const model = api.provider().video();
+    const imageJob = generateVideo({
+      model,
+      prompt: { image: png, text: "Animate" },
+      maxRetries: 0,
+    });
+    for (let i = 0; i < 1000 && !api.calls.some((c) => c.method === "PUT"); i++)
+      await new Promise((resolve) => setImmediate(resolve));
+    const text = await generateVideo({ model, prompt: "Waves", maxRetries: 0 });
+    releaseUpload();
+    const image = await imageJob;
+    const [textCall, imageCall] = api.generations();
+    expect(textCall.url).toBe(`${API}/v1/text-to-video`);
+    expect(textCall.body).not.toHaveProperty("assets");
+    expect(imageCall.url).toBe(`${API}/v1/image-to-video`);
+    expect(imageCall.body.assets.image_file_path).toBe(api.uploads()[0].filePath);
+    expect(text.video.uint8Array).toEqual(api.projects()[0].bytes);
+    expect(image.video.uint8Array).toEqual(api.projects()[1].bytes);
   });
 
   test("sends an HTTPS image URL directly, without downloading or uploading it", async () => {
