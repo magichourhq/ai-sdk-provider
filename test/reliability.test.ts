@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { inspect } from "node:util";
 import { experimental_generateVideo as generateVideo, generateImage } from "ai";
 import { afterEach, describe, expect, test, vi } from "vitest";
@@ -145,6 +146,13 @@ describe("paid generations are never retried", () => {
         }
       );
 
+      test("a 503 with Retry-After is still not retried", async () => {
+        const api = fakeApi({ createStatus: 503, createErrorHeaders: { "Retry-After": "0" } });
+        const error = await rejection(run(api));
+        expect(api.generations()).toHaveLength(1);
+        expectAcceptanceUnknown(error);
+      });
+
       test("a dropped connection leaves acceptance unknown and isn't retried", async () => {
         const api = fakeApi({ createNetworkError: true });
         const error = await rejection(run(api));
@@ -263,6 +271,7 @@ describe("failures after acceptance name the accepted project", () => {
       { statuses: ["complete"], breakBody: (c) => c.method === "GET" && c.url.startsWith(STORAGE) },
     ],
     ["an empty download (200)", { statuses: ["complete"], emptyDownload: true }],
+    ["an unrequested partial download (206)", { statuses: ["complete"], partialDownload: true }],
   ];
 
   for (const [endpoint, run] of endpoints)
@@ -698,6 +707,16 @@ describe("onProjectCreated", () => {
     });
   }
 
+  test("in a real Node process, a save that never finishes still delivers the project ID", () => {
+    // Fake timers can't show this: Node exits once nothing keeps it alive.
+    const output = execFileSync(
+      process.execPath,
+      ["--import", "tsx", new URL("./scripts/hanging-save.ts", import.meta.url).pathname],
+      { encoding: "utf8", timeout: 20_000 }
+    );
+    expect(output.trim()).toBe("projectId=image-77-hang");
+  }, 30_000);
+
   test("is awaited before polling", async () => {
     const api = fakeApi({ statuses: ["complete"] });
     let release!: () => void;
@@ -906,10 +925,9 @@ describe("credentials and error contents", () => {
       "a malformed upload-URL response",
       runImageVideo,
       {
+        // V8's parser error quotes the start of the text, so the secret is in it.
         uploadUrlsResponse: () =>
-          new Response('{"items": [{"upload_url": "SECRET_123', {
-            headers: { "Content-Type": "application/json" },
-          }),
+          new Response("SECRET_123 {", { headers: { "Content-Type": "application/json" } }),
       },
     ],
   ])("%s never echoes the response", async (_, run, options) => {

@@ -1,8 +1,12 @@
 import { NoSuchModelError } from "@ai-sdk/provider";
-import { createProviderRegistry, generateImage } from "ai";
+import {
+  createProviderRegistry,
+  experimental_generateVideo as generateVideo,
+  generateImage,
+} from "ai";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { createMagicHour, magichour, MagicHourError } from "../src/index.js";
-import { fakeApi } from "./fake-api.js";
+import { API, fakeApi, png } from "./fake-api.js";
 
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -57,6 +61,27 @@ describe("API key", () => {
       expect(call.headers.get("Authorization")).toBe("Bearer old-key");
     expect(api.generations()[0].headers.get("Authorization")).toBe("Bearer old-key");
     await generateImage({ model, prompt: "Mug", maxRetries: 0 });
+    expect(api.generations()[1].headers.get("Authorization")).toBe("Bearer new-key");
+  });
+
+  test("a key rotated during an upload doesn't change the running job's account", async () => {
+    let releaseUpload!: () => void;
+    const upload = new Promise<void>((resolve) => (releaseUpload = resolve));
+    const api = fakeApi({
+      statuses: ["complete"],
+      gate: (c) => (c.method === "PUT" ? upload : undefined),
+    });
+    const model = createMagicHour({ fetch: api.fetch, pollIntervalMs: 0 }).video();
+    vi.stubEnv("MAGIC_HOUR_API_KEY", "old-key");
+    const job = generateVideo({ model, prompt: { image: png, text: "Animate" }, maxRetries: 0 });
+    for (let i = 0; i < 1000 && !api.calls.some((c) => c.method === "PUT"); i++)
+      await new Promise((resolve) => setImmediate(resolve));
+    vi.stubEnv("MAGIC_HOUR_API_KEY", "new-key");
+    releaseUpload();
+    await job;
+    for (const call of api.calls.filter((c) => new URL(c.url).origin === API))
+      expect(call.headers.get("Authorization")).toBe("Bearer old-key");
+    await generateVideo({ model, prompt: "Waves", maxRetries: 0 });
     expect(api.generations()[1].headers.get("Authorization")).toBe("Bearer new-key");
   });
 

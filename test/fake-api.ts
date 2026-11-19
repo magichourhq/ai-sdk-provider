@@ -70,6 +70,8 @@ export type FakeApiOptions = {
   statusesFor?: (n: number) => string[] | undefined;
   /** HTTP status for generation requests. Anything but 200 rejects the job. */
   createStatus?: number;
+  /** Extra headers on generation error responses, such as Retry-After. */
+  createErrorHeaders?: Record<string, string>;
   /** Raw response for accepted generation requests, replacing the normal one. */
   createResponse?: (n: number) => Response | undefined;
   /** Makes generation requests fail like a dropped connection. */
@@ -89,6 +91,8 @@ export type FakeApiOptions = {
   downloadStatus?: number;
   /** Serves downloads with an empty HTTP 200 body. */
   emptyDownload?: boolean;
+  /** Serves downloads as an unrequested 206 with only the first half of the file. */
+  partialDownload?: boolean;
   /** HTTP status for the upload-URL request. */
   uploadUrlsStatus?: number;
   /** Response body for the upload-URL request. */
@@ -190,6 +194,19 @@ function stalledBody(signal: AbortSignal, onStall: () => void): ReadableStream<U
   );
 }
 
+/** Streams bytes in three chunks. */
+function chunked(bytes: Uint8Array): ReadableStream<Uint8Array> {
+  const size = Math.ceil(bytes.length / 3);
+  let offset = 0;
+  return new ReadableStream({
+    pull(controller) {
+      if (offset >= bytes.length) return controller.close();
+      controller.enqueue(bytes.slice(offset, offset + size));
+      offset += size;
+    },
+  });
+}
+
 /** Sends the first bytes of the real body, then fails like a reset connection. */
 function brokenBody(prefix: Uint8Array): ReadableStream<Uint8Array> {
   let sent = false;
@@ -224,7 +241,12 @@ export function fakeApi(options: FakeApiOptions = {}) {
   }
 
   function accept(path: string): Response {
-    if (options.createStatus && options.createStatus !== 200) return error(options.createStatus);
+    if (options.createStatus && options.createStatus !== 200) {
+      const response = error(options.createStatus);
+      for (const [name, value] of Object.entries(options.createErrorHeaders ?? {}))
+        response.headers.set(name, value);
+      return response;
+    }
     const n = projects.size + 1;
     const custom = options.createResponse?.(n);
     if (custom) return custom;
@@ -268,7 +290,15 @@ export function fakeApi(options: FakeApiOptions = {}) {
       const status = options.downloadStatusFor?.(project) ?? options.downloadStatus ?? 200;
       if (status !== 200) return error(status);
       if (options.emptyDownload) return new Response(new Uint8Array(0));
-      return new Response(project.bytes as BodyInit);
+      if (options.partialDownload) {
+        const half = project.bytes.subarray(0, project.bytes.length >> 1);
+        return new Response(half as BodyInit, {
+          status: 206,
+          headers: { "Content-Range": `bytes 0-${half.length - 1}/${project.bytes.length}` },
+        });
+      }
+      // Real downloads arrive in several chunks; every one of them must be kept.
+      return new Response(chunked(project.bytes));
     }
     if (origin !== API) return error(404);
 
@@ -342,7 +372,12 @@ export function fakeApi(options: FakeApiOptions = {}) {
               start_seconds: 0,
               end_seconds: 5,
               fps: 24,
-              download: options.nullDownloadField ? null : (downloads[0] ?? null),
+              // Deprecated. It points somewhere the fake doesn't serve, so preferring it over
+              // downloads[0] fails the download.
+              download:
+                options.nullDownloadField || !downloads[0]
+                  ? null
+                  : { url: `${downloads[0].url}&legacy=1`, expires_at: "2000-01-01T00:00:00Z" },
             }
       );
     }
