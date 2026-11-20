@@ -137,6 +137,13 @@ describe("image validation happens before any request", () => {
         maxRetries: 0,
       })
     ).rejects.toThrow(/not image editing/);
+    await expect(
+      generateImage({
+        model: api.provider().image(),
+        prompt: { text: "Make it blue", images: [], mask: png },
+        maxRetries: 0,
+      })
+    ).rejects.toThrow(/not image editing/);
     expect(api.calls).toHaveLength(0);
   });
 

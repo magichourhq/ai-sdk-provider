@@ -297,7 +297,7 @@ describe("image-to-video request", () => {
     expect(api.uploadUrlRequests()).toHaveLength(1);
   });
 
-  test("an image job whose upload finishes after a text job on the same model keeps its route", async () => {
+  test("an image job whose upload finishes after a text job on the same model keeps its own request", async () => {
     let releaseUpload!: () => void;
     const upload = new Promise<void>((resolve) => (releaseUpload = resolve));
     const api = fakeApi({
@@ -308,11 +308,20 @@ describe("image-to-video request", () => {
     const imageJob = generateVideo({
       model,
       prompt: { image: png, text: "Animate" },
+      duration: 1,
+      generateAudio: false,
       maxRetries: 0,
     });
     for (let i = 0; i < 1000 && !api.calls.some((c) => c.method === "PUT"); i++)
       await new Promise((resolve) => setImmediate(resolve));
-    const text = await generateVideo({ model, prompt: "Waves", maxRetries: 0 });
+    const text = await generateVideo({
+      model,
+      prompt: "Waves",
+      duration: 10,
+      resolution: "1920x1080",
+      generateAudio: true,
+      maxRetries: 0,
+    });
     releaseUpload();
     const image = await imageJob;
     const [textCall, imageCall] = api.generations();
@@ -320,6 +329,8 @@ describe("image-to-video request", () => {
     expect(textCall.body).not.toHaveProperty("assets");
     expect(imageCall.url).toBe(`${API}/v1/image-to-video`);
     expect(imageCall.body.assets.image_file_path).toBe(api.uploads()[0].filePath);
+    expect(textCall.body).toMatchObject({ end_seconds: 10, resolution: "1080p", audio: true });
+    expect(imageCall.body).toMatchObject({ end_seconds: 1, resolution: "480p", audio: false });
     expect(text.video.uint8Array).toEqual(api.projects()[0].bytes);
     expect(image.video.uint8Array).toEqual(api.projects()[1].bytes);
   });
@@ -338,13 +349,14 @@ describe("image-to-video request", () => {
     });
   });
 
-  test("an image without text sends no prompt", async () => {
+  test.each([
+    ["a URL", "https://example.com/image.png"],
+    ["binary data", png],
+  ])("an image without text sends no prompt: %s", async (_, image) => {
     const api = fakeApi({ statuses: ["complete"] });
-    await generateVideo({
-      model: api.provider().video(),
-      prompt: { image: "https://example.com/image.png" },
-      maxRetries: 0,
-    });
+    await generateVideo({ model: api.provider().video(), prompt: { image }, maxRetries: 0 });
+    expect(api.generations()).toHaveLength(1);
+    expect(api.generations()[0].url).toBe(`${API}/v1/image-to-video`);
     expect(api.generations()[0].body).not.toHaveProperty("style");
   });
 

@@ -146,11 +146,12 @@ describe("paid generations are never retried", () => {
         }
       );
 
-      test("a 503 with Retry-After is still not retried", async () => {
-        const api = fakeApi({ createStatus: 503, createErrorHeaders: { "Retry-After": "0" } });
+      test.each([429, 503])("HTTP %i with Retry-After is still not retried", async (status) => {
+        const api = fakeApi({ createStatus: status, createErrorHeaders: { "Retry-After": "1" } });
         const error = await rejection(run(api));
         expect(api.generations()).toHaveLength(1);
-        expectAcceptanceUnknown(error);
+        expect((error as MagicHourError).status).toBe(status);
+        expect((error as MagicHourError).projectId).toBeUndefined();
       });
 
       test("a dropped connection leaves acceptance unknown and isn't retried", async () => {
@@ -418,11 +419,12 @@ describe("cancellation", () => {
     });
     return { api, signal: controller.signal };
   }
-  test("an already-aborted signal sends nothing", async () => {
+  test.each(endpoints)("%s: an already-aborted signal sends nothing", async (_, run) => {
     const api = fakeApi();
     const controller = new AbortController();
-    controller.abort();
-    await expect(runImage(api, { abortSignal: controller.signal })).rejects.toThrow();
+    controller.abort(new Error("ABORT_REASON_SECRET"));
+    const error = await rejection(run(api, { abortSignal: controller.signal }));
+    expectNoSecret(error, "ABORT_REASON_SECRET");
     expect(api.calls).toHaveLength(0);
   });
 
@@ -577,6 +579,20 @@ describe("timing", () => {
     expect(elapsed).toBeLessThan(600);
   });
 
+  test.each(endpoints)("%s: invalid timing settings fail before any request", async (_, run) => {
+    for (const settings of [
+      { pollIntervalMs: -1 },
+      { pollIntervalMs: NaN },
+      { timeoutMs: 0 },
+      { timeoutMs: NaN },
+      { timeoutMs: Infinity },
+    ]) {
+      const api = fakeApi();
+      await rejection(run(api, { settings }));
+      expect(api.calls).toHaveLength(0);
+    }
+  });
+
   test("polls every 2 seconds by default", async () => {
     const api = fakeApi({ statuses: ["rendering", "rendering", "complete"] });
     vi.useFakeTimers();
@@ -680,16 +696,17 @@ describe("onProjectCreated", () => {
       [
         "throws",
         () => {
-          throw new Error("database down");
+          throw new Error("database down SAVE_SECRET_7");
         },
       ],
-      ["rejects", async () => Promise.reject(new Error("database down"))],
+      ["rejects", async () => Promise.reject(new Error("database down SAVE_SECRET_7"))],
     ])(
       `${endpoint}: a save that %s names the project and stops before polling`,
       async (_, save) => {
         const api = fakeApi();
         const error = await rejection(run(api, { settings: { onProjectCreated: save } }));
         expectRecoverable(error, onlyProject(api));
+        expectNoSecret(error, "SAVE_SECRET_7");
         expect(api.polls()).toHaveLength(0);
       }
     );
@@ -707,6 +724,40 @@ describe("onProjectCreated", () => {
     });
   }
 
+  test("a save that never finishes gets only what's left of timeoutMs after a slow upload", async () => {
+    const api = fakeApi({ delay: (c) => (c.method === "PUT" ? 600 : 0) });
+    const { error, elapsed } = await underFakeTime(() =>
+      runImageVideo(api, {
+        settings: { timeoutMs: 1000, onProjectCreated: () => new Promise<void>(() => {}) },
+      })
+    );
+    expectRecoverable(error, onlyProject(api));
+    expect(api.polls()).toHaveLength(0);
+    expect(elapsed).toBeLessThan(1200);
+  });
+
+  test.each(endpoints)(
+    "%s: aborting while a save hangs names the project right away",
+    async (_, run) => {
+      const api = fakeApi();
+      const controller = new AbortController();
+      const { error, elapsed } = await underFakeTime(() =>
+        run(api, {
+          abortSignal: controller.signal,
+          settings: {
+            onProjectCreated: () => {
+              controller.abort();
+              return new Promise<void>(() => {});
+            },
+          },
+        })
+      );
+      expectRecoverable(error, onlyProject(api));
+      expect(api.polls()).toHaveLength(0);
+      expect(elapsed).toBeLessThan(100);
+    }
+  );
+
   test("in a real Node process, a save that never finishes still delivers the project ID", () => {
     // Fake timers can't show this: Node exits once nothing keeps it alive.
     const output = execFileSync(
@@ -716,6 +767,25 @@ describe("onProjectCreated", () => {
     );
     expect(output.trim()).toBe("projectId=image-77-hang");
   }, 30_000);
+
+  test("n jobs each save their own project before it's polled", async () => {
+    const api = fakeApi({ statuses: ["rendering", "complete"] });
+    const saved: { id: string; polled: boolean }[] = [];
+    const settings: MagicHourSettings = {
+      onProjectCreated: ({ id }) => {
+        saved.push({ id, polled: api.polls().some((c) => c.url.endsWith(`/${id}`)) });
+      },
+    };
+    await generateImage({ model: api.provider(settings).image(), prompt: "Mug", n: 2 });
+    expect(api.projects()).toHaveLength(2);
+    expect(saved.map((s) => s.id).sort()).toEqual(
+      api
+        .projects()
+        .map((p) => p.id)
+        .sort()
+    );
+    expect(saved.every((s) => !s.polled)).toBe(true);
+  });
 
   test("is awaited before polling", async () => {
     const api = fakeApi({ statuses: ["complete"] });
@@ -922,6 +992,17 @@ describe("credentials and error contents", () => {
     ["a failed upload", runImageVideo, { uploadStatus: 403 }],
     ["an insufficient-credits rejection", runImage, { createStatus: 402 }],
     [
+      "a plain-text rejection",
+      runImageVideo,
+      {
+        createResponse: () =>
+          new Response(`Invalid image ${STORAGE}/in.png?X-Goog-Signature=SECRET_123`, {
+            status: 422,
+            headers: { "Content-Type": "text/plain" },
+          }),
+      },
+    ],
+    [
       "a malformed upload-URL response",
       runImageVideo,
       {
@@ -1019,6 +1100,21 @@ describe("credentials and error contents", () => {
           items: [
             {
               upload_url: "https://user:URL_SECRET_42@videos.magichour.ai/in.png",
+              file_path: "api-assets/x.png",
+              expires_at: "2099-01-01T00:00:00Z",
+            },
+          ],
+        },
+      },
+    ],
+    [
+      "an upload URL that doesn't parse",
+      runImageVideo,
+      {
+        uploadUrlsBody: {
+          items: [
+            {
+              upload_url: "https://videos.magichour.ai:bad/in.png?sig=URL_SECRET_42",
               file_path: "api-assets/x.png",
               expires_at: "2099-01-01T00:00:00Z",
             },
