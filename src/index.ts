@@ -151,12 +151,9 @@ export function createMagicHour(settings: MagicHourSettings = {}): MagicHourProv
             warnings: [],
             isRetryable: false,
             response: { timestamp, modelId, headers: undefined },
+            // The AI SDK keeps only this list, and joins it across calls.
             providerMetadata: {
-              magichour: {
-                projectId: id,
-                creditsCharged: project.credits_charged,
-                images: [{ projectId: id, creditsCharged: project.credits_charged }],
-              },
+              magichour: { images: [{ projectId: id, creditsCharged: project.credits_charged }] },
             },
           };
         } catch {
@@ -280,8 +277,9 @@ export function createMagicHour(settings: MagicHourSettings = {}): MagicHourProv
             videos: [{ type: "binary", data, mediaType: "video/mp4" }],
             warnings: [],
             response: { timestamp, modelId, headers: undefined },
+            // A list, because the AI SDK joins only `videos` across calls and overwrites the rest.
             providerMetadata: {
-              magichour: { projectId: id, creditsCharged: project.credits_charged },
+              magichour: { videos: [{ projectId: id, creditsCharged: project.credits_charged }] },
             },
           };
         } catch {
