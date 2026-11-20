@@ -6,3 +6,4 @@ node_modules/
 magic-hour-image.png
 magic-hour-video.mp4
 .env*
+coverage/

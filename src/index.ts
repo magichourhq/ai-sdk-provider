@@ -44,6 +44,30 @@ function extra(options: ImageModelV4CallOptions | VideoModelV4CallOptions, allow
     if (!allowed.includes(key)) throw new Error(`Unsupported Magic Hour option: ${key}.`);
   return values;
 }
+function ascii(text: string): number[] {
+  return [...text].map((c) => c.charCodeAt(0));
+}
+/** Checks the file signature, so mislabeled or non-image data never reaches a paid job. */
+function hasSignature(bytes: Uint8Array, extension: string): boolean {
+  function startsWith(offset: number, signature: number[]): boolean {
+    return signature.every((byte, i) => bytes[offset + i] === byte);
+  }
+  if (extension === "png") return startsWith(0, [0x89, ...ascii("PNG\r\n"), 0x1a, 0x0a]);
+  if (extension === "jpg") return startsWith(0, [0xff, 0xd8, 0xff]);
+  return startsWith(0, ascii("RIFF")) && startsWith(8, ascii("WEBP"));
+}
+/** Decodes strict base64, which `Buffer.from` would otherwise accept with characters dropped. */
+function base64Bytes(value: string): Uint8Array {
+  if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value))
+    throw new Error("Image data must be base64.");
+  return new Uint8Array(Buffer.from(value, "base64"));
+}
+/** Parses "WIDTHxHEIGHT" with positive whole numbers. */
+function dimensions(value: string): [width: number, height: number] {
+  const match = /^([1-9]\d*)x([1-9]\d*)$/.exec(value);
+  if (!match) throw new Error("Dimensions must look like 1024x1024.");
+  return [Number(match[1]), Number(match[2])];
+}
 function imageResolution(size: string | undefined, option: unknown): ImageResolution {
   if (option !== undefined && !isOneOf(imageResolutions, option))
     throw new Error("Image resolution must be 640px, 1k, or 2k.");
@@ -51,8 +75,7 @@ function imageResolution(size: string | undefined, option: unknown): ImageResolu
   if (option !== undefined)
     throw new Error("Use either size or providerOptions.magichour.resolution.");
   // Magic Hour exposes longest-edge tiers, rather than arbitrary pixel sizes.
-  const [width, height] = size.split("x").map(Number);
-  const edge = Math.max(width, height);
+  const edge = Math.max(...dimensions(size));
   const tier = new Map<number, ImageResolution>([
     [640, "640px"],
     [1024, "1k"],
@@ -66,8 +89,7 @@ function imageResolution(size: string | undefined, option: unknown): ImageResolu
 }
 function ratioFromSize(size: string | undefined): AspectRatio | undefined {
   if (!size) return undefined;
-  const [w, h] = size.split("x").map(Number);
-  if (w <= 0 || h <= 0) throw new Error("Invalid dimensions.");
+  const [w, h] = dimensions(size);
   for (const r of aspectRatios) {
     const [rw, rh] = r.split(":").map(Number);
     if (Math.abs(w / h - rw / rh) < 0.002) return r;
@@ -167,7 +189,7 @@ export function createMagicHour(settings: MagicHourSettings = {}): MagicHourProv
         let resolution: VideoResolution = extras.resolution ?? "480p";
         const dimensionsRatio = ratioFromSize(options.resolution);
         if (options.resolution) {
-          const shortEdge = Math.min(...options.resolution.split("x").map(Number));
+          const shortEdge = Math.min(...dimensions(options.resolution));
           const mapped = new Map<number, VideoResolution>([
             [360, "360p"],
             [480, "480p"],
@@ -217,8 +239,10 @@ export function createMagicHour(settings: MagicHourSettings = {}): MagicHourProv
           if (!extension) throw new Error("Image-to-video accepts PNG, JPEG, or WebP.");
           const bytes =
             typeof options.image.data === "string"
-              ? new Uint8Array(Buffer.from(options.image.data, "base64"))
+              ? base64Bytes(options.image.data)
               : options.image.data;
+          if (!hasSignature(bytes, extension))
+            throw new Error(`The input image data isn't a ${extension.toUpperCase()} file.`);
           imagePath = await transport.uploadImage(bytes, extension, signal);
         }
         const timestamp = new Date();

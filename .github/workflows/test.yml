@@ -7,12 +7,19 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
   test:
+    name: test (${{ matrix.ai }} ai)
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # "locked" uses yarn.lock. "latest" upgrades ai and @ai-sdk/provider to the newest
+        # releases our ranges allow.
+        ai: [locked, latest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -22,5 +29,10 @@ jobs:
           node-version: "24"
           package-manager-cache: false
       - run: yarn install --immutable
+      - if: matrix.ai == 'latest'
+        run: yarn up -R ai @ai-sdk/provider
+      - if: matrix.ai == 'latest'
+        run: yarn why ai && yarn why @ai-sdk/provider
       - run: yarn check
       - run: yarn test
+      - run: yarn build
