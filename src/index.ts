@@ -6,22 +6,36 @@ import {
   type Experimental_VideoModelV4CallOptions as VideoModelV4CallOptions,
   type ProviderV4,
 } from "@ai-sdk/provider";
-import { MagicHourClient, MagicHourError, httpsURL, type ClientSettings } from "./client.js";
-export { MagicHourError } from "./client.js";
+import {
+  MagicHourClient,
+  MagicHourError,
+  httpsURL,
+  type ClientSettings,
+} from "@magichourhq/browser-client";
+export { MagicHourError } from "@magichourhq/browser-client";
 export type MagicHourSettings = Omit<ClientSettings, "apiKey"> & { apiKey?: string };
 const imageModels = ["default", "flux-2-klein", "z-image-turbo", "qwen-image-2.1"] as const;
 const videoModels = ["default", "ltx-2.5", "minimax-h3", "wan-2.2"] as const;
 export type MagicHourImageModelId = (typeof imageModels)[number];
 export type MagicHourVideoModelId = (typeof videoModels)[number];
+const aspectRatios = ["1:1", "16:9", "9:16"] as const;
+type AspectRatio = (typeof aspectRatios)[number];
+const imageResolutions = ["640px", "1k", "2k"] as const;
+type ImageResolution = (typeof imageResolutions)[number];
+const videoResolutions = ["360p", "480p", "720p", "1080p", "4k"] as const;
+type VideoResolution = (typeof videoResolutions)[number];
+function isOneOf<T extends string>(values: readonly T[], value: unknown): value is T {
+  return (values as readonly unknown[]).includes(value);
+}
 export interface MagicHourProvider extends Omit<ProviderV4, "imageModel"> {
   image(modelId?: MagicHourImageModelId): ImageModelV4;
   imageModel(modelId?: string): ImageModelV4;
   video(modelId?: MagicHourVideoModelId): VideoModelV4;
   videoModel(modelId?: MagicHourVideoModelId): VideoModelV4;
 }
-function ratio(value: string | undefined): string | undefined {
-  if (value !== undefined && !["1:1", "16:9", "9:16"].includes(value))
-    throw new Error("Supported aspect ratios: 1:1, 16:9, 9:16.");
+function ratio(value: string | undefined): AspectRatio | undefined {
+  if (value === undefined) return undefined;
+  if (!isOneOf(aspectRatios, value)) throw new Error("Supported aspect ratios: 1:1, 16:9, 9:16.");
   return value;
 }
 function extra(options: ImageModelV4CallOptions | VideoModelV4CallOptions, allowed: string[]) {
@@ -30,19 +44,16 @@ function extra(options: ImageModelV4CallOptions | VideoModelV4CallOptions, allow
     if (!allowed.includes(key)) throw new Error(`Unsupported Magic Hour option: ${key}.`);
   return values;
 }
-function imageResolution(size: string | undefined, option: unknown): string {
-  if (
-    option !== undefined &&
-    (typeof option !== "string" || !["640px", "1k", "2k"].includes(option))
-  )
+function imageResolution(size: string | undefined, option: unknown): ImageResolution {
+  if (option !== undefined && !isOneOf(imageResolutions, option))
     throw new Error("Image resolution must be 640px, 1k, or 2k.");
-  if (!size) return (option as string | undefined) ?? "640px";
+  if (!size) return option ?? "640px";
   if (option !== undefined)
     throw new Error("Use either size or providerOptions.magichour.resolution.");
   // Magic Hour exposes longest-edge tiers, rather than arbitrary pixel sizes.
   const [width, height] = size.split("x").map(Number);
   const edge = Math.max(width, height);
-  const tier = new Map([
+  const tier = new Map<number, ImageResolution>([
     [640, "640px"],
     [1024, "1k"],
     [2048, "2k"],
@@ -53,11 +64,11 @@ function imageResolution(size: string | undefined, option: unknown): string {
     );
   return tier;
 }
-function ratioFromSize(size: string | undefined): string | undefined {
+function ratioFromSize(size: string | undefined): AspectRatio | undefined {
   if (!size) return undefined;
   const [w, h] = size.split("x").map(Number);
   if (w <= 0 || h <= 0) throw new Error("Invalid dimensions.");
-  for (const r of ["1:1", "16:9", "9:16"]) {
+  for (const r of aspectRatios) {
     const [rw, rh] = r.split(":").map(Number);
     if (Math.abs(w / h - rw / rh) < 0.002) return r;
   }
@@ -71,7 +82,7 @@ export function createMagicHour(settings: MagicHourSettings = {}): MagicHourProv
       apiKey: settings.apiKey ?? process.env.MAGIC_HOUR_API_KEY ?? "",
     });
   function image(modelId: string = "default"): ImageModelV4 {
-    if (!(imageModels as readonly string[]).includes(modelId))
+    if (!isOneOf(imageModels, modelId))
       throw new NoSuchModelError({ modelId, modelType: "imageModel" });
     return {
       specificationVersion: "v4",
@@ -98,7 +109,6 @@ export function createMagicHour(settings: MagicHourSettings = {}): MagicHourProv
         const timestamp = new Date();
         const id = await transport.create(
           "ai-image-generator",
-          "image",
           {
             model: modelId,
             image_count: 1,
@@ -150,19 +160,15 @@ export function createMagicHour(settings: MagicHourSettings = {}): MagicHourProv
         if (options.frameImages?.length || options.inputReferences?.length)
           throw new Error("Frame and reference inputs are not supported by this adapter.");
         const extras = extra(options, ["resolution"]);
-        if (
-          extras.resolution !== undefined &&
-          (typeof extras.resolution !== "string" ||
-            !["360p", "480p", "720p", "1080p", "4k"].includes(extras.resolution))
-        )
+        if (extras.resolution !== undefined && !isOneOf(videoResolutions, extras.resolution))
           throw new Error("Invalid Magic Hour video resolution.");
         if (options.resolution && extras.resolution !== undefined)
           throw new Error("Use either resolution or providerOptions.magichour.resolution.");
-        let resolution = extras.resolution ?? "480p";
+        let resolution: VideoResolution = extras.resolution ?? "480p";
         const dimensionsRatio = ratioFromSize(options.resolution);
         if (options.resolution) {
           const shortEdge = Math.min(...options.resolution.split("x").map(Number));
-          const mapped = new Map([
+          const mapped = new Map<number, VideoResolution>([
             [360, "360p"],
             [480, "480p"],
             [720, "720p"],
@@ -216,22 +222,33 @@ export function createMagicHour(settings: MagicHourSettings = {}): MagicHourProv
           imagePath = await transport.uploadImage(bytes, extension, signal);
         }
         const timestamp = new Date();
-        const id = await transport.create(
-          imagePath ? "image-to-video" : "text-to-video",
-          "video",
-          {
-            model: modelId,
-            end_seconds: duration,
-            resolution,
-            ...(options.prompt ? { style: { prompt: options.prompt } } : {}),
-            ...(imagePath
-              ? { assets: { image_file_path: imagePath } }
-              : { aspect_ratio: aspectRatio ?? "16:9" }),
-            ...(options.generateAudio !== undefined ? { audio: options.generateAudio } : {}),
-          },
-          signal,
-          options.headers
-        );
+        const shared = {
+          model: modelId,
+          end_seconds: duration,
+          resolution,
+          ...(options.generateAudio !== undefined ? { audio: options.generateAudio } : {}),
+        };
+        const id = imagePath
+          ? await transport.create(
+              "image-to-video",
+              {
+                ...shared,
+                ...(options.prompt ? { style: { prompt: options.prompt } } : {}),
+                assets: { image_file_path: imagePath },
+              },
+              signal,
+              options.headers
+            )
+          : await transport.create(
+              "text-to-video",
+              {
+                ...shared,
+                style: { prompt: options.prompt ?? "" },
+                aspect_ratio: aspectRatio ?? "16:9",
+              },
+              signal,
+              options.headers
+            );
         const project = await transport.wait(id, "video", signal, options.headers);
         try {
           const data = await transport.download(project.downloads[0].url, signal);
