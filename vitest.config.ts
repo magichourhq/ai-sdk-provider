@@ -3,6 +3,8 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     setupFiles: ["test/setup.ts"],
+    unstubEnvs: true,
+    unstubGlobals: true,
     coverage: {
       enabled: true,
       provider: "v8",
