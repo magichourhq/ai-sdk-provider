@@ -54,14 +54,7 @@ export function runImageVideo(
   });
 }
 
-/** Every paid endpoint. Used where each endpoint submits or uploads differently. */
-export const endpoints: [endpoint: string, run: Run][] = [
-  ["ai-image-generator", runImage],
-  ["text-to-video", runTextVideo],
-  ["image-to-video", runImageVideo],
-];
-
-/** One run per project kind. Both video endpoints share the same path after acceptance. */
+/** One run per model type. Both video endpoints share the same code after the upload. */
 export const kinds: [kind: "image" | "video", run: Run][] = [
   ["image", runImage],
   ["video", runTextVideo],

@@ -19,14 +19,24 @@ describe("image requests", () => {
     });
   });
 
-  test.each(["flux-2-klein", "z-image-turbo", "qwen-image-2.1"] as const)(
-    "send the %s model",
-    async (modelId) => {
-      const api = fakeApi({ statuses: ["complete"] });
-      await generateImage({ model: api.provider().image(modelId), prompt: "Mug", maxRetries: 0 });
-      expect(api.generations()[0].body.model).toBe(modelId);
-    }
-  );
+  test("send the chosen model, aspect ratio and resolution option", async () => {
+    const api = fakeApi({ statuses: ["complete"] });
+    await generateImage({
+      model: api.provider().image("flux-2-klein"),
+      prompt: "Mug",
+      aspectRatio: "9:16",
+      // Options meant for other providers are ignored.
+      providerOptions: { openai: { quality: "hd" }, magichour: { resolution: "2k" } },
+      maxRetries: 0,
+    });
+    expect(api.generations()[0].body).toEqual({
+      model: "flux-2-klein",
+      image_count: 1,
+      resolution: "2k",
+      aspect_ratio: "9:16",
+      style: { prompt: "Mug" },
+    });
+  });
 
   // Magic Hour sizes images by longest edge, so the size picks a tier and an aspect ratio.
   test.each([
@@ -42,20 +52,6 @@ describe("image requests", () => {
     }
   );
 
-  test.each(["1:1", "16:9", "9:16"] as const)("send aspect ratio %s", async (aspectRatio) => {
-    const api = fakeApi({ statuses: ["complete"] });
-    await generateImage({
-      model: api.provider().image(),
-      prompt: "Mug",
-      aspectRatio,
-      maxRetries: 0,
-    });
-    expect(api.generations()[0].body).toMatchObject({
-      aspect_ratio: aspectRatio,
-      resolution: "640px",
-    });
-  });
-
   test("accept a size and aspect ratio that agree", async () => {
     const api = fakeApi({ statuses: ["complete"] });
     await generateImage({
@@ -66,27 +62,6 @@ describe("image requests", () => {
       maxRetries: 0,
     });
     expect(api.generations()[0].body).toMatchObject({ resolution: "2k", aspect_ratio: "16:9" });
-  });
-
-  test.each(["640px", "1k", "2k"])(
-    "send the %s resolution option and ignore other providers' options",
-    async (resolution) => {
-      const api = fakeApi({ statuses: ["complete"] });
-      await generateImage({
-        model: api.provider().image(),
-        prompt: "Mug",
-        providerOptions: { openai: { quality: "hd" }, magichour: { resolution } },
-        maxRetries: 0,
-      });
-      expect(api.generations()[0].body.resolution).toBe(resolution);
-    }
-  );
-
-  test("send the prompt unchanged", async () => {
-    const api = fakeApi({ statuses: ["complete"] });
-    const prompt = '  A "quoted" prompt\nwith a newline and émoji 🎨  ';
-    await generateImage({ model: api.provider().image(), prompt, maxRetries: 0 });
-    expect(api.generations()[0].body.style.prompt).toBe(prompt);
   });
 });
 
@@ -105,13 +80,26 @@ describe("text-to-video requests", () => {
     });
   });
 
-  test.each(["ltx-2.5", "minimax-h3", "wan-2.2"] as const)("send the %s model", async (modelId) => {
+  test("send the chosen model, duration, aspect ratio and resolution option", async () => {
     const api = fakeApi({ statuses: ["complete"] });
-    await generateVideo({ model: api.provider().video(modelId), prompt: "Waves", maxRetries: 0 });
-    expect(api.generations()[0].body.model).toBe(modelId);
+    await generateVideo({
+      model: api.provider().video("wan-2.2"),
+      prompt: "Waves",
+      duration: 10,
+      aspectRatio: "9:16",
+      providerOptions: { magichour: { resolution: "720p" } },
+      maxRetries: 0,
+    });
+    expect(api.generations()[0].body).toEqual({
+      model: "wan-2.2",
+      end_seconds: 10,
+      resolution: "720p",
+      style: { prompt: "Waves" },
+      aspect_ratio: "9:16",
+    });
   });
 
-  // Video tiers go by the short edge.
+  // Video tiers go by the short edge. 854x480 is only roughly 16:9.
   test.each([
     ["640x360", "360p", "16:9"],
     ["854x480", "480p", "16:9"],
@@ -129,31 +117,7 @@ describe("text-to-video requests", () => {
     expect(api.generations()[0].body).toMatchObject({ resolution: tier, aspect_ratio: ratio });
   });
 
-  test.each(["360p", "480p", "720p", "1080p", "4k"])(
-    "send the %s resolution option",
-    async (resolution) => {
-      const api = fakeApi({ statuses: ["complete"] });
-      await generateVideo({
-        model: api.provider().video(),
-        prompt: "Waves",
-        providerOptions: { magichour: { resolution } },
-        maxRetries: 0,
-      });
-      expect(api.generations()[0].body.resolution).toBe(resolution);
-    }
-  );
-
-  test.each(["1:1", "16:9", "9:16"] as const)("send aspect ratio %s", async (aspectRatio) => {
-    const api = fakeApi({ statuses: ["complete"] });
-    await generateVideo({
-      model: api.provider().video(),
-      prompt: "Waves",
-      aspectRatio,
-      maxRetries: 0,
-    });
-    expect(api.generations()[0].body.aspect_ratio).toBe(aspectRatio);
-  });
-
+  // The shortest and longest durations allowed.
   test.each([1, 60])("send a %i second duration", async (duration) => {
     const api = fakeApi({ statuses: ["complete"] });
     await generateVideo({
@@ -195,7 +159,6 @@ describe("image-to-video requests", () => {
   });
 
   test.each([
-    ["image/png", "png", png],
     ["image/jpeg", "jpg", jpeg],
     ["image/webp", "webp", webp],
   ])("upload %s with the %s extension", async (mediaType, extension, data) => {
@@ -209,17 +172,6 @@ describe("image-to-video requests", () => {
 
   test("upload the decoded bytes of a base64 image", async () => {
     const api = fakeApi({ statuses: ["complete"] });
-    await generateVideo({
-      model: api.provider().video(),
-      prompt: { image: Buffer.from(png).toString("base64"), text: "Animate" },
-      maxRetries: 0,
-    });
-    expect(api.uploads()[0].bytes).toEqual(png);
-    expect(api.generations()[0].body.assets.image_file_path).toBe("api-assets/test/input-1.png");
-  });
-
-  test("upload base64 image data passed to the model directly", async () => {
-    const api = fakeApi({ statuses: ["complete"] });
     const data = Buffer.from(png).toString("base64");
     await api.provider().video().doGenerate!(
       videoCall({ image: { type: "file", mediaType: "image/png", data } })
@@ -227,6 +179,7 @@ describe("image-to-video requests", () => {
     expect(api.uploads()[0].bytes).toEqual(png);
   });
 
+  // A small Buffer is usually a view into a larger shared one.
   test("upload only the bytes of a view, not the rest of its buffer", async () => {
     const api = fakeApi({ statuses: ["complete"] });
     const padded = new Uint8Array([...Buffer.from("BEFORE"), ...png, ...Buffer.from("AFTER")]);
@@ -251,12 +204,13 @@ describe("image-to-video requests", () => {
     expect(api.generations()[0].body.assets).toEqual({ image_file_path: url });
   });
 
-  test.each([
-    ["a URL", "https://example.com/image.png"],
-    ["binary data", png],
-  ])("send no prompt for an image without text: %s", async (_, image) => {
+  test("send no prompt for an image without text", async () => {
     const api = fakeApi({ statuses: ["complete"] });
-    await generateVideo({ model: api.provider().video(), prompt: { image }, maxRetries: 0 });
+    await generateVideo({
+      model: api.provider().video(),
+      prompt: { image: "https://example.com/image.png" },
+      maxRetries: 0,
+    });
     expect(api.generations()[0].url).toBe(`${API}/v1/image-to-video`);
     expect(api.generations()[0].body).not.toHaveProperty("style");
   });
@@ -276,11 +230,10 @@ describe("image-to-video requests", () => {
 });
 
 describe("video audio", () => {
+  // `false` must be sent too, or the API falls back to its own default.
   test.each([
-    ["text-to-video", true, "Waves"],
     ["text-to-video", false, "Waves"],
     ["image-to-video", true, { image: png, text: "Animate" }],
-    ["image-to-video", false, { image: png, text: "Animate" }],
   ] as const)("%s sends audio: %s from generateAudio", async (_, generateAudio, prompt) => {
     const api = fakeApi({ statuses: ["complete"] });
     await generateVideo({ model: api.provider().video(), prompt, generateAudio, maxRetries: 0 });

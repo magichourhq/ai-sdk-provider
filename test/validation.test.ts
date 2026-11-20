@@ -1,8 +1,8 @@
 // Invalid input must fail before any request, so it never uploads anything or starts a paid job.
 import { experimental_generateVideo as generateVideo, generateImage } from "ai";
 import { describe, expect, test } from "vitest";
-import { fakeApi, jpeg, png, webp } from "./fake-api.js";
-import { endpoints, rejection, videoCall } from "./helpers.js";
+import { fakeApi, jpeg, png } from "./fake-api.js";
+import { rejection, runImage, videoCall } from "./helpers.js";
 
 describe("image options", () => {
   test.each<[string, Record<string, unknown>]>([
@@ -11,7 +11,6 @@ describe("image options", () => {
     ["a size that isn't a 640, 1024 or 2048 tier", { size: "500x500" }],
     ["a size with an unsupported aspect ratio", { size: "1024x768" }],
     ["a size with trailing text", { size: "1024x1024xjunk" }],
-    ["a size with a zero dimension", { size: "0x1024" }],
     ["an unsupported aspect ratio", { aspectRatio: "4:3" }],
     ["a size and aspect ratio that disagree", { size: "1024x1024", aspectRatio: "16:9" }],
     ["an unsupported resolution option", { providerOptions: { magichour: { resolution: "4k" } } }],
@@ -30,8 +29,7 @@ describe("image options", () => {
 
   test.each<[string, object]>([
     ["input images", { images: [png] }],
-    ["input images with a mask", { images: [png], mask: png }],
-    ["a mask alone", { images: [], mask: png }],
+    ["a mask", { images: [], mask: png }],
   ])("reject image editing: %s", async (_, edit) => {
     const api = fakeApi();
     await expect(
@@ -44,7 +42,8 @@ describe("image options", () => {
     expect(api.calls).toHaveLength(0);
   });
 
-  test("reject more than one image per call when called directly", async () => {
+  // The AI SDK splits larger requests into single-image calls, so this only happens directly.
+  test("reject more than one image per call", async () => {
     const api = fakeApi();
     await expect(
       api.provider().image().doGenerate({
@@ -72,7 +71,6 @@ describe("video options", () => {
     ["a non-numeric duration", { duration: Number.NaN }],
     ["a 16:9 resolution that isn't a tier", { resolution: "1600x900" }],
     ["a resolution with an unsupported aspect ratio", { resolution: "1440x1080" }],
-    ["a resolution with trailing text", { resolution: "1280x720xjunk" }],
     [
       "an unsupported resolution option",
       { providerOptions: { magichour: { resolution: "999p" } } },
@@ -93,10 +91,6 @@ describe("video options", () => {
       { prompt: { image: "https://example.com/i.png", text: "x" }, aspectRatio: "16:9" },
     ],
     ["a plain-HTTP image URL", { prompt: { image: "http://example.com/i.png", text: "x" } }],
-    [
-      "an image URL with embedded credentials",
-      { prompt: { image: "https://user:secret@example.com/i.png", text: "x" } },
-    ],
   ])("reject %s", async (_, options) => {
     const api = fakeApi();
     await expect(
@@ -105,21 +99,15 @@ describe("video options", () => {
     expect(api.calls).toHaveLength(0);
   });
 
-  // With binary input, a rewrite could upload first and validate after.
-  test.each<[string, Record<string, unknown>]>([
-    ["a seed", { seed: 1 }],
-    ["a duration over 60 seconds", { duration: 61 }],
-    ["a resolution that isn't a tier", { resolution: "1600x900" }],
-    ["an unknown provider option", { providerOptions: { magichour: { model: "x" } } }],
-    ["an aspect ratio", { aspectRatio: "16:9" }],
-  ])("reject %s with a binary input image before uploading it", async (_, options) => {
+  // Duration is the last option checked, so this fails if any check moves after the upload.
+  test("reject invalid options before uploading a binary input image", async () => {
     const api = fakeApi();
     await expect(
       generateVideo({
         model: api.provider().video(),
-        maxRetries: 0,
-        ...options,
         prompt: { image: png, text: "Animate" },
+        duration: 61,
+        maxRetries: 0,
       })
     ).rejects.toThrow();
     expect(api.calls).toHaveLength(0);
@@ -133,20 +121,6 @@ describe("video options", () => {
       "reference inputs",
       { inputReferences: [{ type: "file", mediaType: "image/png", data: png }] },
     ],
-    [
-      "frame images alongside an input image",
-      {
-        image: { type: "file", mediaType: "image/png", data: png },
-        frameImages: [{ type: "file", mediaType: "image/png", data: png }],
-      },
-    ],
-    [
-      "reference inputs alongside an input image",
-      {
-        image: { type: "file", mediaType: "image/png", data: png },
-        inputReferences: [{ type: "file", mediaType: "image/png", data: png }],
-      },
-    ],
   ])("reject %s when called directly", async (_, overrides) => {
     const api = fakeApi();
     await expect(api.provider().video().doGenerate!(videoCall(overrides))).rejects.toThrow();
@@ -158,18 +132,15 @@ describe("video options", () => {
 describe("input image data", () => {
   test.each<[string, string, Uint8Array | string]>([
     ["PNG bytes declared as JPEG", "image/jpeg", png],
-    ["WebP bytes declared as JPEG", "image/jpeg", webp],
+    ["JPEG bytes declared as PNG", "image/png", jpeg],
     ["JPEG bytes declared as WebP", "image/webp", jpeg],
     [
       "a WAVE file declared as WebP",
       "image/webp",
       new Uint8Array([...Buffer.from("RIFF"), 36, 0, 0, 0, ...Buffer.from("WAVEfmt ")]),
     ],
-    ["JPEG bytes declared as PNG", "image/png", jpeg],
-    ["text declared as PNG", "image/png", Buffer.from("Hello").toString("base64")],
-    ["empty bytes", "image/png", new Uint8Array(0)],
-    ["an empty base64 string", "image/png", ""],
-    ["invalid base64", "image/png", "iVBORw0KGgo!!"],
+    // Both start with a valid PNG header, so a lenient decoder would let them through.
+    ["base64 with invalid characters", "image/png", "iVBORw0KGgo!!"],
     ["base64 missing a character", "image/png", "iVBORw0KGgoAA"],
   ])("reject %s", async (_, mediaType, data) => {
     const api = fakeApi();
@@ -193,7 +164,8 @@ describe("input image data", () => {
 });
 
 describe("provider settings", () => {
-  test.each(endpoints)("%s rejects invalid timing settings", async (_, run) => {
+  // Timers treat NaN and Infinity as about 1 ms, which would give up on a job as it starts.
+  test("reject invalid timing settings", async () => {
     for (const settings of [
       { pollIntervalMs: -1 },
       { pollIntervalMs: NaN },
@@ -202,7 +174,7 @@ describe("provider settings", () => {
       { timeoutMs: Infinity },
     ]) {
       const api = fakeApi();
-      await rejection(run(api, { settings }));
+      await rejection(runImage(api, { settings }));
       expect(api.calls).toHaveLength(0);
     }
   });

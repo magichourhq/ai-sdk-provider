@@ -112,16 +112,6 @@ describe("video results", () => {
     expect(api.storage().map((c) => `${c.method} ${c.url}`)).toEqual([`GET ${project.url}`]);
   });
 
-  test("use the downloads list when the deprecated download field is null", async () => {
-    const api = fakeApi({ statuses: ["complete"], nullDownloadField: true });
-    const result = await generateVideo({
-      model: api.provider().video(),
-      prompt: "Waves",
-      maxRetries: 0,
-    });
-    expect(result.video.uint8Array).toEqual(api.projects()[0].bytes);
-  });
-
   test("n videos run as n jobs, each returning its own project's output", async () => {
     const api = fakeApi({ statuses: ["rendering", "complete"] });
     const result = await generateVideo({

@@ -46,7 +46,6 @@ export type Call = {
   method: string;
   headers: Headers;
   redirect: RequestRedirect;
-  credentials: RequestCredentials;
   /** Parsed JSON for JSON requests, otherwise the raw body bytes. */
   body: any;
 };
@@ -80,15 +79,11 @@ export type FakeApiOptions = {
   redirect?: (call: Call) => string | undefined;
   /** HTTP status for project polls. */
   projectStatus?: number;
-  /** Raw response for project polls, replacing the normal one. */
-  pollResponse?: () => Response | undefined;
-  /** The `error` object on failed projects. */
-  projectError?: { message: string; code: string };
   /** Overrides the downloads listed on a complete project. */
   downloads?: (project: Project) => { url: string; expires_at: string }[];
   /** The charge on every project, or per project. */
   creditsCharged?: number | ((project: Project) => number);
-  /** HTTP status for media downloads. 204 sends no body. */
+  /** HTTP status for media downloads. */
   downloadStatus?: number;
   /** Serves downloads with an empty HTTP 200 body. */
   emptyDownload?: boolean;
@@ -98,8 +93,6 @@ export type FakeApiOptions = {
   uploadUrlsStatus?: number;
   /** Response body for the upload-URL request. */
   uploadUrlsBody?: unknown;
-  /** Raw response for the upload-URL request, replacing the normal one. */
-  uploadUrlsResponse?: () => Response;
   /** HTTP status for the upload PUT. */
   uploadStatus?: number;
   /** Text in every error response's JSON `message`, to check it never reaches the caller. */
@@ -110,12 +103,6 @@ export type FakeApiOptions = {
   stallBody?: (call: Call) => (() => void) | false;
   /** Responses whose body breaks partway, like a connection reset after some of the data. */
   breakBody?: (call: Call) => boolean;
-  /** Sets the deprecated single `download` field on video projects to null. */
-  nullDownloadField?: boolean;
-  /** Holds a request until the returned promise settles (or the request is aborted). */
-  gate?: (call: Call) => Promise<void> | undefined;
-  /** HTTP status for one project's download, overriding `downloadStatus`. */
-  downloadStatusFor?: (project: Project) => number | undefined;
   /** Milliseconds to wait before answering a request (uses setTimeout, so fake timers apply). */
   delay?: (call: Call) => number;
 };
@@ -233,7 +220,6 @@ export function fakeApi(options: FakeApiOptions = {}) {
   const providers = new WeakMap<MagicHourSettings, ReturnType<typeof createMagicHour>>();
 
   function error(status: number): Response {
-    if (status === 204) return new Response(null, { status });
     const code = status === 402 ? "insufficient_credits" : `http_${status}`;
     return Response.json(
       { code, message: options.errorMessage ?? `Request failed (${status})` },
@@ -272,7 +258,7 @@ export function fakeApi(options: FakeApiOptions = {}) {
     );
   }
 
-  async function respond(call: Call, signal: AbortSignal): Promise<Response> {
+  async function respond(call: Call): Promise<Response> {
     const { url, method } = call;
     const origin = new URL(url).origin;
     const path = new URL(url).pathname;
@@ -288,7 +274,7 @@ export function fakeApi(options: FakeApiOptions = {}) {
       }
       const project = [...projects.values()].find((p) => p.url === url);
       if (method !== "GET" || !project) return error(404);
-      const status = options.downloadStatusFor?.(project) ?? options.downloadStatus ?? 200;
+      const status = options.downloadStatus ?? 200;
       if (status !== 200) return error(status);
       if (options.emptyDownload) return new Response(new Uint8Array(0));
       if (options.partialDownload) {
@@ -307,7 +293,6 @@ export function fakeApi(options: FakeApiOptions = {}) {
       if (!isJson(call.headers)) return error(415);
       if (options.uploadUrlsStatus && options.uploadUrlsStatus !== 200)
         return error(options.uploadUrlsStatus);
-      if (options.uploadUrlsResponse) return options.uploadUrlsResponse();
       const n = uploads.length + 1;
       const upload = {
         url: `${STORAGE}/uploads/input-${n}.png?X-Goog-Signature=sig%2Bup%2F${n}%26y%3D`,
@@ -344,8 +329,6 @@ export function fakeApi(options: FakeApiOptions = {}) {
         return error(options.projectStatus);
       const project = projects.get(decodeURIComponent(match[2]));
       if (!project || project.kind !== match[1]) return error(404);
-      const raw = options.pollResponse?.();
-      if (raw) return raw;
       const status = project.statuses[Math.min(project.polls++, project.statuses.length - 1)];
       const downloads =
         status === "complete"
@@ -367,7 +350,7 @@ export function fakeApi(options: FakeApiOptions = {}) {
         // Deprecated and different from the charge; it must never be reported as one.
         total_frame_cost: credits * 10,
         credits_charged: credits,
-        error: status === "error" ? (options.projectError ?? null) : null,
+        error: status === "error" ? { code: "unknown_error", message: "Render failed" } : null,
         downloads,
       };
       return Response.json(
@@ -383,10 +366,9 @@ export function fakeApi(options: FakeApiOptions = {}) {
               fps: 24,
               // Deprecated. It points somewhere the fake doesn't serve, so preferring it over
               // downloads[0] fails the download.
-              download:
-                options.nullDownloadField || !downloads[0]
-                  ? null
-                  : { url: `${downloads[0].url}&legacy=1`, expires_at: "2000-01-01T00:00:00Z" },
+              download: downloads[0]
+                ? { url: `${downloads[0].url}&legacy=1`, expires_at: "2000-01-01T00:00:00Z" }
+                : null,
             }
       );
     }
@@ -396,14 +378,12 @@ export function fakeApi(options: FakeApiOptions = {}) {
   async function handle(call: Call, signal: AbortSignal): Promise<Response> {
     calls.push(call);
     if (options.hold?.(call)) return untilAborted(signal);
-    const gate = options.gate?.(call);
-    if (gate) await Promise.race([gate, untilAborted(signal)]);
     const delay = options.delay?.(call);
     if (delay) await sleep(delay, signal);
     const onStall = options.stallBody?.(call);
-    if (onStall) return withBody(await respond(call, signal), stalledBody(signal, onStall));
+    if (onStall) return withBody(await respond(call), stalledBody(signal, onStall));
     if (options.breakBody?.(call)) {
-      const response = await respond(call, signal);
+      const response = await respond(call);
       const bytes = new Uint8Array(await response.arrayBuffer());
       return withBody(response, brokenBody(bytes.subarray(0, Math.min(16, bytes.length >> 1))));
     }
@@ -418,7 +398,7 @@ export function fakeApi(options: FakeApiOptions = {}) {
       if (new URL(location).origin !== new URL(call.url).origin) headers.delete("Authorization");
       return handle({ ...call, url: location, headers }, signal);
     }
-    return respond(call, signal);
+    return respond(call);
   }
 
   const fetch: typeof globalThis.fetch = async (input, init) => {
@@ -433,7 +413,6 @@ export function fakeApi(options: FakeApiOptions = {}) {
       method: request.method,
       headers: request.headers,
       redirect: request.redirect,
-      credentials: request.credentials,
       body: bytes.length
         ? isJson(request.headers)
           ? JSON.parse(new TextDecoder().decode(bytes))
