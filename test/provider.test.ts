@@ -105,6 +105,15 @@ describe("API key", () => {
       expect(call.headers.get("Authorization")).toBe("Bearer explicit-key");
   });
 
+  test("an empty explicit key fails instead of using the environment's", async () => {
+    vi.stubEnv("MAGIC_HOUR_API_KEY", "env-key");
+    const api = fakeApi();
+    await expect(
+      generateImage({ model: api.provider({ apiKey: "" }).image(), prompt: "Mug", maxRetries: 0 })
+    ).rejects.toThrow();
+    expect(api.calls).toHaveLength(0);
+  });
+
   test("the default provider uses the global fetch and the environment key", async () => {
     const api = fakeApi({ statuses: ["complete"] });
     vi.stubGlobal("fetch", api.fetch);

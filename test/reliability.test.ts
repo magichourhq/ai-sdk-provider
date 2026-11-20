@@ -493,6 +493,31 @@ describe("cancellation", () => {
     expect(api.generations()).toHaveLength(1);
   });
 
+  test.each(endpoints)(
+    "%s: aborting once the acceptance has arrived still names the project",
+    async (_, run) => {
+      const api = fakeApi();
+      const controller = new AbortController();
+      // The whole response is already buffered when the abort comes.
+      const fetch: typeof globalThis.fetch = async (input, init) => {
+        const response = await api.fetch(input, init);
+        if (!isGeneration(api.calls.at(-1)!)) return response;
+        const buffered = new Response(await response.arrayBuffer(), response);
+        queueMicrotask(() => controller.abort());
+        return buffered;
+      };
+      const saved: string[] = [];
+      const error = await rejection(
+        run(api, {
+          abortSignal: controller.signal,
+          settings: { fetch, onProjectCreated: ({ id }) => void saved.push(id) },
+        })
+      );
+      expectRecoverable(error, onlyProject(api));
+      expect(saved).toEqual([onlyProject(api)]);
+    }
+  );
+
   test("aborting an in-flight upload starts no paid job", async () => {
     const { api, signal } = abortWhenHeld((c) => c.method === "PUT");
     await expect(runImageVideo(api, { abortSignal: signal })).rejects.toThrow();
@@ -593,13 +618,13 @@ describe("timing", () => {
     }
   });
 
-  test("in a real Node process, successful calls leave nothing keeping it alive", () => {
+  test("in a real Node process, finished calls leave nothing keeping it alive", () => {
     const output = execFileSync(
       process.execPath,
       ["--import", "tsx", new URL("./scripts/clean-exit.ts", import.meta.url).pathname],
       { encoding: "utf8", timeout: 20_000 }
     );
-    expect(output.trim()).toBe("done=2");
+    expect(output.trim().split("\n")).toEqual(["done=2", "failed=image-1-63z"]);
   }, 30_000);
 
   test("polls every 2 seconds by default", async () => {

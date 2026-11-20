@@ -440,7 +440,10 @@ export function fakeApi(options: FakeApiOptions = {}) {
           : bytes
         : undefined,
     };
-    return handle(call, signal);
+    const response = await handle(call, signal);
+    // Like the real fetch, responses carry the URL they answer, signature included.
+    if (!response.url) Object.defineProperty(response, "url", { value: call.url });
+    return response;
   };
 
   return {
