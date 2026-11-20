@@ -42,10 +42,22 @@ describe("text-to-video", () => {
     expect(api.storage().map((c) => c.url)).toEqual([project.url]);
     expect(result.video.uint8Array).toEqual(project.bytes);
     expect(result.video.mediaType).toBe("video/mp4");
-    expect(result.providerMetadata.magichour).toMatchObject({
-      projectId: project.id,
-      creditsCharged: 5,
+    expect(result.providerMetadata.magichour.videos).toEqual([
+      { projectId: project.id, creditsCharged: 5 },
+    ]);
+  });
+
+  test("runs n videos as n jobs, and reports each project", async () => {
+    const api = fakeApi();
+    const result = await generateVideo({
+      model: api.provider().video(),
+      prompt: "Waves",
+      n: 2,
+      maxRetries: 0,
     });
+    expect(result.videos).toHaveLength(2);
+    const metadata = result.providerMetadata.magichour.videos as { projectId: string }[];
+    expect(metadata.map((m) => m.projectId).sort()).toEqual(api.projects.map((p) => p.id).sort());
   });
 
   test("sends the chosen model, duration, aspect ratio, resolution option and audio setting", async () => {

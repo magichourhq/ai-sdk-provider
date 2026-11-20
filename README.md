@@ -71,7 +71,7 @@ Every generation is a paid job. The provider submits it once, waits for it to fi
 - **If a submission's outcome is unknown**, for example after a dropped connection, the error says so and has no `projectId`. Check your account history before submitting again.
 - **Aborting stops waiting.** It doesn't cancel the job on Magic Hour.
 
-The project ID and the credits charged are in `providerMetadata.magichour`.
+Each job's project ID and credits charged are in `providerMetadata.magichour.images` or `providerMetadata.magichour.videos`, one entry per image or video.
 
 ## Development
 
