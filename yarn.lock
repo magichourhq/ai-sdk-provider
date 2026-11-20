@@ -341,7 +341,7 @@ __metadata:
     vitest: "npm:^5.1.0"
     zod: "npm:^4.6.7"
   peerDependencies:
-    ai: ^7.0.148
+    ai: ^7.0.0
   languageName: unknown
   linkType: soft
 
