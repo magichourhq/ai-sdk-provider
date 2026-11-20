@@ -1,4 +1,4 @@
-import { createMagicHour, type MagicHourSettings } from "../src/index.js";
+import { createMagicHour, type MagicHourSettings } from "../../src/index.js";
 
 export const API = "https://api.magichour.ai";
 // Uploads and outputs live on a separate host, behind signed URLs.

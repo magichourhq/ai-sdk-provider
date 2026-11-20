@@ -1,6 +1,6 @@
 import { experimental_generateVideo as generateVideo } from "ai";
 import { describe, expect, test } from "vitest";
-import { API, fakeApi, gif, jpeg, png, webp } from "./fake-api.js";
+import { API, fakeApi, gif, jpeg, png, webp } from "./setup/fake-api.js";
 
 /** Call options for the model itself, for inputs `generateVideo` can't produce. */
 function directCall(overrides: Record<string, unknown>): any {

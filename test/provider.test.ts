@@ -2,7 +2,7 @@ import { NoSuchModelError } from "@ai-sdk/provider";
 import { createProviderRegistry, generateImage } from "ai";
 import { describe, expect, test, vi } from "vitest";
 import { createMagicHour, magichour } from "../src/index.js";
-import { fakeApi } from "./fake-api.js";
+import { fakeApi } from "./setup/fake-api.js";
 
 describe("provider", () => {
   // Importing the package creates a provider, so this must work before a key is configured.

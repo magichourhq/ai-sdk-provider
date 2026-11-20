@@ -3,7 +3,7 @@
 import { experimental_generateVideo as generateVideo, generateImage } from "ai";
 import { describe, expect, test } from "vitest";
 import { MagicHourError, type MagicHourSettings } from "../src/index.js";
-import { fakeApi, type FakeApiOptions, png } from "./fake-api.js";
+import { fakeApi, type FakeApiOptions, png } from "./setup/fake-api.js";
 
 type Api = ReturnType<typeof fakeApi>;
 type Options = { settings?: MagicHourSettings; abortSignal?: AbortSignal };

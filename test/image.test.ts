@@ -1,6 +1,6 @@
 import { generateImage } from "ai";
 import { describe, expect, test } from "vitest";
-import { API, fakeApi, png } from "./fake-api.js";
+import { API, fakeApi, png } from "./setup/fake-api.js";
 
 describe("image generation", () => {
   test("sends the default request and returns the project's output, ID and charge", async () => {
