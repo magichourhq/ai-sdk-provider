@@ -73,13 +73,13 @@ describe("image request", () => {
   });
 
   test.each(["640px", "1k", "2k"])(
-    "sends the %s resolution from provider options",
+    "sends the %s resolution from provider options, ignoring other providers' options",
     async (resolution) => {
       const api = fakeApi({ statuses: ["complete"] });
       await generateImage({
         model: api.provider().image(),
         prompt: "Mug",
-        providerOptions: { magichour: { resolution } },
+        providerOptions: { openai: { quality: "hd" }, magichour: { resolution } },
         maxRetries: 0,
       });
       expect(api.generations()[0].body.resolution).toBe(resolution);

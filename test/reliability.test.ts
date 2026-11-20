@@ -621,8 +621,14 @@ describe("timing", () => {
   test("timeoutMs is one deadline across upload, submission and waiting", async () => {
     const api = fakeApi({
       statuses: ["rendering"],
-      // 600 ms upload + 200 ms submission, then polling until the shared 1000 ms deadline.
-      delay: (c) => (c.method === "PUT" ? 600 : isGeneration(c) ? 200 : 0),
+      // 300 ms upload URL + 300 ms upload + 200 ms submission, then polling until the shared
+      // 1000 ms deadline.
+      delay: (c) =>
+        c.url.endsWith("/files/upload-urls") || c.method === "PUT"
+          ? 300
+          : isGeneration(c)
+            ? 200
+            : 0,
     });
     const { error, elapsed } = await underFakeTime(() =>
       runImageVideo(api, { settings: { timeoutMs: 1000, pollIntervalMs: 100 } })
@@ -1023,6 +1029,19 @@ describe("credentials and error contents", () => {
     ["a failed upload-URL request", runImageVideo, { uploadUrlsStatus: 500 }],
     ["a failed upload", runImageVideo, { uploadStatus: 403 }],
     ["an insufficient-credits rejection", runImage, { createStatus: 402 }],
+    [
+      "a rejected job with a signed input image URL",
+      (api, options) =>
+        generateVideo({
+          model: api.provider().video(),
+          prompt: {
+            image: "https://cdn.example.com/in.png?X-Amz-Signature=SECRET_123",
+            text: "Go",
+          },
+          maxRetries: options?.maxRetries,
+        }),
+      { createStatus: 422 },
+    ],
     [
       "a plain-text rejection",
       runImageVideo,

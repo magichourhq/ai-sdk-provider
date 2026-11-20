@@ -74,7 +74,7 @@ export type FakeApiOptions = {
   createErrorHeaders?: Record<string, string>;
   /** Raw response for accepted generation requests, replacing the normal one. */
   createResponse?: (n: number) => Response | undefined;
-  /** Makes generation requests fail like a dropped connection. */
+  /** Accepts generation requests, then fails like a connection reset before the response. */
   createNetworkError?: boolean;
   /** Answers matching requests with a 307 to the returned URL. */
   redirect?: (call: Call) => string | undefined;
@@ -329,7 +329,12 @@ export function fakeApi(options: FakeApiOptions = {}) {
 
     if (method === "POST" && path in generationKinds) {
       if (!isJson(call.headers)) return error(415);
-      if (options.createNetworkError) throw new TypeError("fetch failed");
+      if (options.createNetworkError) {
+        accept(path);
+        // What Node's fetch throws when the socket resets.
+        const reset = Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" });
+        throw new TypeError("fetch failed", { cause: reset });
+      }
       return accept(path);
     }
 
