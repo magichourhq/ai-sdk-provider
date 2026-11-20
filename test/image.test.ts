@@ -86,6 +86,16 @@ describe("image request", () => {
     }
   );
 
+  test("a reused model sends each call its own size", async () => {
+    const api = fakeApi({ statuses: ["complete"] });
+    const model = api.provider().image();
+    await generateImage({ model, prompt: "Mug", size: "640x640", maxRetries: 0 });
+    await generateImage({ model, prompt: "Mug", size: "2048x1152", maxRetries: 0 });
+    const [first, second] = api.generations().map((c) => c.body);
+    expect(first).toMatchObject({ resolution: "640px", aspect_ratio: "1:1" });
+    expect(second).toMatchObject({ resolution: "2k", aspect_ratio: "16:9" });
+  });
+
   test("passes the prompt through unchanged", async () => {
     const api = fakeApi({ statuses: ["complete"] });
     const prompt = '  A "quoted" prompt\nwith a newline and émoji 🎨  ';

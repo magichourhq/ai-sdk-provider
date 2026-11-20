@@ -117,6 +117,20 @@ describe("API key", () => {
     expect(api.generations()).toHaveLength(1);
     expect(api.generations()[0].headers.get("Authorization")).toBe("Bearer env-key");
   });
+
+  test("the global fetch never replays a paid request after a dropped connection", async () => {
+    const api = fakeApi({ createNetworkError: true });
+    vi.stubGlobal("fetch", api.fetch);
+    const error = await generateImage({
+      model: createMagicHour({ apiKey: "test-key" }).image(),
+      prompt: "Mug",
+      maxRetries: 3,
+    }).catch((e: unknown) => e);
+    expect(api.generations()).toHaveLength(1);
+    expect(error).toBeInstanceOf(MagicHourError);
+    expect((error as MagicHourError).projectId).toBeUndefined();
+    expect((error as Error).message).toMatch(/Acceptance is unknown/);
+  });
 });
 
 describe("custom fetch", () => {

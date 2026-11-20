@@ -201,6 +201,18 @@ describe("image-to-video request", () => {
     expect(api.uploads()[0].bytes).toEqual(data);
   });
 
+  test("a reused buffer refilled with a new image uploads the new bytes", async () => {
+    const api = fakeApi({ statuses: ["complete"] });
+    const model = api.provider().video();
+    const image = png.slice();
+    await generateVideo({ model, prompt: { image, text: "Animate" }, maxRetries: 0 });
+    image[image.length - 5] ^= 0xff;
+    await generateVideo({ model, prompt: { image, text: "Animate" }, maxRetries: 0 });
+    expect(api.uploads()).toHaveLength(2);
+    expect(api.uploads()[1].bytes).toEqual(image);
+    expect(api.generations()[1].body.assets.image_file_path).toBe(api.uploads()[1].filePath);
+  });
+
   test("uploads only the bytes of a view, not the rest of its buffer", async () => {
     const api = fakeApi({ statuses: ["complete"] });
     const padded = new Uint8Array([
@@ -633,6 +645,7 @@ describe("video result", () => {
     const api = fakeApi({
       statusesFor: (n) =>
         n === 1 ? ["rendering", "rendering", "rendering", "complete"] : ["complete"],
+      creditsCharged: (project) => (project.id.startsWith("video-1-") ? 9 : 18),
     });
     const model = api.provider({ pollIntervalMs: 5 }).video();
     const results = await Promise.all([
@@ -643,6 +656,7 @@ describe("video result", () => {
     results.forEach((result, i) => {
       const projectId = (result.providerMetadata as any).magichour.projectId;
       expect(projectId).toBe(api.projects()[i].id);
+      expect((result.providerMetadata as any).magichour.creditsCharged).toBe([9, 18][i]);
       const video = result.videos[0] as { type: "binary"; data: Uint8Array };
       expect(video.data).toEqual(api.projects()[i].bytes);
     });

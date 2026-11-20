@@ -86,7 +86,8 @@ export type FakeApiOptions = {
   projectError?: { message: string; code: string };
   /** Overrides the downloads listed on a complete project. */
   downloads?: (project: Project) => { url: string; expires_at: string }[];
-  creditsCharged?: number;
+  /** The charge on every project, or per project. */
+  creditsCharged?: number | ((project: Project) => number);
   /** HTTP status for media downloads. 204 sends no body. */
   downloadStatus?: number;
   /** Serves downloads with an empty HTTP 200 body. */
@@ -347,7 +348,10 @@ export function fakeApi(options: FakeApiOptions = {}) {
               { url: project.url, expires_at: "2099-01-01T00:00:00Z" },
             ])
           : [];
-      const credits = options.creditsCharged ?? 5;
+      const credits =
+        typeof options.creditsCharged === "function"
+          ? options.creditsCharged(project)
+          : (options.creditsCharged ?? 5);
       // Every field the spec marks required, so a stricter parser still accepts these.
       const common = {
         id: project.id,

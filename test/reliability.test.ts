@@ -119,7 +119,7 @@ async function underFakeTime(start: () => Promise<unknown>, step = 5) {
 
 describe("paid generations are never retried", () => {
   const rejected = [400, 401, 402, 403, 404, 409, 422, 425, 429];
-  const ambiguous = [408, 500, 502, 503, 504];
+  const ambiguous = [408, 500, 501, 502, 503, 504, 524];
 
   for (const [endpoint, run] of endpoints) {
     describe(endpoint, () => {
@@ -593,6 +593,15 @@ describe("timing", () => {
     }
   });
 
+  test("in a real Node process, successful calls leave nothing keeping it alive", () => {
+    const output = execFileSync(
+      process.execPath,
+      ["--import", "tsx", new URL("./scripts/clean-exit.ts", import.meta.url).pathname],
+      { encoding: "utf8", timeout: 20_000 }
+    );
+    expect(output.trim()).toBe("done=2");
+  }, 30_000);
+
   test("polls every 2 seconds by default", async () => {
     const api = fakeApi({ statuses: ["rendering", "rendering", "complete"] });
     vi.useFakeTimers();
@@ -621,6 +630,15 @@ describe("timing", () => {
     expectRecoverable(error, onlyProject(api));
     expect(elapsed).toBeGreaterThanOrEqual(1000);
     expect(elapsed).toBeLessThan(1200);
+  });
+
+  test.each(endpoints)("%s: a slow submission shortens the wait that follows", async (_, run) => {
+    const api = fakeApi({ statuses: ["rendering"], delay: (c) => (isGeneration(c) ? 400 : 0) });
+    const { error, elapsed } = await underFakeTime(() =>
+      run(api, { settings: { timeoutMs: 500, pollIntervalMs: 50 } })
+    );
+    expectRecoverable(error, onlyProject(api));
+    expect(elapsed).toBeLessThan(600);
   });
 
   test.each(endpoints)(
@@ -912,15 +930,29 @@ describe("credentials and error contents", () => {
   test("two providers with different keys running at once each use their own key", async () => {
     const api = fakeApi({ statuses: ["queued", "rendering", "rendering", "complete"] });
     const keys = ["key-tenant-a", "key-tenant-b"];
+    // Each tenant's own fetch, so a request sent through the other tenant's fetch shows up.
+    const seen: string[][] = [[], []];
     await Promise.all(
       keys.map((apiKey, i) =>
         generateImage({
-          model: api.provider({ apiKey }).image(),
+          model: api
+            .provider({
+              apiKey,
+              fetch: (input, init) => {
+                seen[i].push(new Request(input, init).headers.get("Authorization") ?? "storage");
+                return api.fetch(input, init);
+              },
+            })
+            .image(),
           prompt: `Tenant ${i}`,
           maxRetries: 0,
         })
       )
     );
+    seen.forEach((auth, i) => {
+      expect(auth.length).toBeGreaterThan(2);
+      for (const value of auth) expect(["storage", `Bearer ${keys[i]}`]).toContain(value);
+    });
     expect(api.projects()).toHaveLength(2);
     api.generations().forEach((call, i) => {
       const keyUsed = call.headers.get("Authorization");
@@ -1015,6 +1047,8 @@ describe("credentials and error contents", () => {
     const api = fakeApi({ ...options, errorMessage: secret });
     const error = await rejection(run(api, { maxRetries: 0 }));
     expectNoSecret(error, "SECRET_123");
+    // Nor the signed URL of the request that failed.
+    expectNoSecret(error, "Signature");
   });
 
   test.each<[string, (c: { url: string; method: string }) => boolean]>([
