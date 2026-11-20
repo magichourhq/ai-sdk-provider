@@ -1,8 +1,8 @@
 {
   "name": "@magichourhq/ai-sdk-provider",
-  "version": "0.1.1",
+  "version": "0.1.0",
   "packageManager": "yarn@4.18.0",
-  "description": "Magic Hour image and video provider for Vercel AI SDK",
+  "description": "Magic Hour image and video provider for the AI SDK",
   "type": "module",
   "license": "MIT",
   "engines": {
