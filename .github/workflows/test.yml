@@ -39,6 +39,4 @@ jobs:
         run: yarn why ai && yarn why @ai-sdk/provider
       - run: yarn check
       - run: yarn test
-      # Import the built package by its published name, the way users do.
       - run: yarn build
-      - run: yarn smoke

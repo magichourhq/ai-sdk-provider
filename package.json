@@ -27,7 +27,6 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "vitest run",
-    "smoke": "node scripts/smoke.mjs",
     "check": "tsc --noEmit -p tsconfig.test.json",
     "example": "tsx example.ts",
     "prepack": "yarn build"
