@@ -289,7 +289,7 @@ __metadata:
   resolution: "@magichourhq/ai-sdk-provider@workspace:."
   dependencies:
     "@ai-sdk/provider": "npm:^4.0.31"
-    "@magichourhq/browser-client": "npm:^0.3.0"
+    "@magichourhq/browser-client": "npm:^0.3.2"
     "@types/node": "npm:^24.0.0"
     ai: "npm:^7.0.148"
     tsx: "npm:^4.20.0"
@@ -309,12 +309,12 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@magichourhq/browser-client@npm:^0.3.0":
-  version: 0.3.0
-  resolution: "@magichourhq/browser-client@npm:0.3.0"
+"@magichourhq/browser-client@npm:^0.3.2":
+  version: 0.3.2
+  resolution: "@magichourhq/browser-client@npm:0.3.2"
   dependencies:
     "@magichourhq/api-types": "npm:0.1.1"
-  checksum: 10/00849982bccf295cc81ee3e5826ec0d9d97a086d0b56322193c7e2678a1f3635079da4e685a48dcbe2a17fde35ea61ddcdfc680ad310991d7637af1ddf083f91
+  checksum: 10/9a3d9cfc5418fe865977942c6daae59d5cd79d00b991a89f4f649a6df6e267a0ecb85b7a968282b1c52e953dc26af874b44b675fecd0fd2597d00ef30a30ed95
   languageName: node
   linkType: hard
 
