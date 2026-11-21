@@ -2,6 +2,7 @@ import {
   NoSuchModelError,
   type ImageModelV4,
   type ImageModelV4CallOptions,
+  type ImageModelV4File,
   type Experimental_VideoModelV4 as VideoModelV4,
   type Experimental_VideoModelV4CallOptions as VideoModelV4CallOptions,
   type ProviderV4,
@@ -11,16 +12,21 @@ import {
   MagicHourError,
   httpsURL,
   type ClientSettings,
+  type CreateBody,
 } from "@magichourhq/browser-client";
 export { MagicHourError } from "@magichourhq/browser-client";
 export type MagicHourSettings = Omit<ClientSettings, "apiKey"> & { apiKey?: string };
-const imageModels = ["default", "flux-2-klein", "z-image-turbo", "qwen-image-2.1"] as const;
-const videoModels = ["default", "ltx-2.5", "minimax-h3", "wan-2.2"] as const;
-export type MagicHourImageModelId = (typeof imageModels)[number];
-export type MagicHourVideoModelId = (typeof videoModels)[number];
+// Model IDs come from the API spec through @magichourhq/api-types. The API checks each model's
+// own limits (resolutions, durations, plan) and rejects a bad request before it charges anything.
+type GenerateImageModel = NonNullable<CreateBody<"ai-image-generator">["model"]>;
+type EditImageModel = NonNullable<CreateBody<"ai-image-editor">["model"]>;
+type VideoModel = NonNullable<CreateBody<"text-to-video">["model"]>;
+const editAspectRatios = ["auto", "1:1", "16:9", "9:16", "4:3", "3:2", "4:5", "2:3"] as const;
+export type MagicHourImageModelId = GenerateImageModel | EditImageModel;
+export type MagicHourVideoModelId = VideoModel | NonNullable<CreateBody<"image-to-video">["model"]>;
 const aspectRatios = ["1:1", "16:9", "9:16"] as const;
 type AspectRatio = (typeof aspectRatios)[number];
-const imageResolutions = ["640px", "1k", "2k"] as const;
+const imageResolutions = ["640px", "1k", "2k", "4k"] as const;
 type ImageResolution = (typeof imageResolutions)[number];
 const videoResolutions = ["360p", "480p", "720p", "1080p", "4k"] as const;
 type VideoResolution = (typeof videoResolutions)[number];
@@ -68,10 +74,31 @@ function dimensions(value: string): [width: number, height: number] {
   if (!match) throw new Error("Dimensions must look like 1024x1024.");
   return [Number(match[1]), Number(match[2])];
 }
-function imageResolution(size: string | undefined, option: unknown): ImageResolution {
+type InputImage = { url: string } | { bytes: Uint8Array; extension: string };
+/** Checks an input image without uploading it, so a bad file never follows a good upload. */
+function inputImage(file: ImageModelV4File): InputImage {
+  if (file.type === "url") return { url: httpsURL(file.url) };
+  const extension = (
+    { "image/png": "png", "image/jpeg": "jpg", "image/webp": "webp" } as Record<string, string>
+  )[file.mediaType];
+  if (!extension) throw new Error("Input images must be PNG, JPEG, or WebP.");
+  const bytes = typeof file.data === "string" ? base64Bytes(file.data) : file.data;
+  if (!hasSignature(bytes, extension))
+    throw new Error(`The input image data isn't a ${extension.toUpperCase()} file.`);
+  return { bytes, extension };
+}
+async function filePath(
+  transport: MagicHourClient,
+  input: InputImage,
+  signal: AbortSignal
+): Promise<string> {
+  if ("url" in input) return input.url;
+  return transport.uploadImage(input.bytes, input.extension, signal);
+}
+function imageResolution(size: string | undefined, option: unknown): ImageResolution | undefined {
   if (option !== undefined && !isOneOf(imageResolutions, option))
-    throw new Error("Image resolution must be 640px, 1k, or 2k.");
-  if (!size) return option ?? "640px";
+    throw new Error("Image resolution must be 640px, 1k, 2k, or 4k.");
+  if (!size) return option;
   if (option !== undefined)
     throw new Error("Use either size or providerOptions.magichour.resolution.");
   // Magic Hour exposes longest-edge tiers, rather than arbitrary pixel sizes.
@@ -96,6 +123,25 @@ function ratioFromSize(size: string | undefined): AspectRatio | undefined {
   }
   throw new Error("Dimensions must have a 1:1, 16:9, or 9:16 aspect ratio.");
 }
+/**
+ * Names the operation and model in an API rejection. One model setting reaches several endpoints,
+ * so the API's own message ("model must be one of …") doesn't say which one refused it.
+ */
+async function submit(action: string, modelId: string, create: () => Promise<string>) {
+  try {
+    return await create();
+  } catch (error) {
+    if (error instanceof MagicHourError && error.status! < 500 && !error.projectId)
+      throw new MagicHourError(
+        `Magic Hour can't ${action} with ${modelId}: ${error.message}`,
+        undefined,
+        error.status,
+        undefined,
+        error.code
+      );
+    throw error;
+  }
+}
 export function createMagicHour(settings: MagicHourSettings = {}): MagicHourProvider {
   // Resolve credentials lazily so merely importing or registering the provider needs no key.
   const client = () =>
@@ -104,20 +150,21 @@ export function createMagicHour(settings: MagicHourSettings = {}): MagicHourProv
       apiKey: settings.apiKey ?? process.env.MAGIC_HOUR_API_KEY ?? "",
     });
   function image(modelId: string = "default"): ImageModelV4 {
-    if (!isOneOf(imageModels, modelId))
-      throw new NoSuchModelError({ modelId, modelType: "imageModel" });
     return {
       specificationVersion: "v4",
       provider: "magichour.image",
       modelId,
       maxImagesPerCall: 1,
-      supportsFileInputs: false,
+      // The API rejects input images for a model that can't edit, before charging anything.
+      supportsFileInputs: true,
       supportsMaskInputs: false,
       async doGenerate(options) {
-        if (!options.prompt?.trim()) throw new Error("An image prompt is required.");
+        const prompt = options.prompt;
+        if (!prompt?.trim()) throw new Error("An image prompt is required.");
         if (options.n !== 1) throw new Error("One image per request is supported.");
-        if (options.files?.length || options.mask)
-          throw new Error("This provider supports image generation, not image editing.");
+        if (options.mask) throw new Error("Masks are not supported.");
+        const files = options.files ?? [];
+        if (files.length > 10) throw new Error("Image editing accepts up to 10 input images.");
         if (options.seed !== undefined)
           throw new Error("Magic Hour does not expose a seed parameter.");
         const extras = extra(options, ["resolution"]);
@@ -125,22 +172,54 @@ export function createMagicHour(settings: MagicHourSettings = {}): MagicHourProv
         const sizeRatio = ratioFromSize(options.size);
         if (sizeRatio && options.aspectRatio && sizeRatio !== options.aspectRatio)
           throw new Error("size and aspectRatio disagree.");
-        const aspectRatio = ratio(options.aspectRatio ?? sizeRatio);
+        const requestedRatio = options.aspectRatio ?? sizeRatio;
+        if (files.length && requestedRatio && !isOneOf(editAspectRatios, requestedRatio))
+          throw new Error(`Supported aspect ratios for editing: ${editAspectRatios.join(", ")}.`);
+        const inputs = files.map(inputImage);
         const transport = client();
         const signal = transport.signal(options.abortSignal);
-        const timestamp = new Date();
-        const id = await transport.create(
-          "ai-image-generator",
-          {
-            model: modelId,
-            image_count: 1,
-            resolution,
-            ...(aspectRatio ? { aspect_ratio: aspectRatio } : {}),
-            style: { prompt: options.prompt },
-          },
-          signal,
-          options.headers
-        );
+        let id: string;
+        let timestamp: Date;
+        if (inputs.length) {
+          const paths: string[] = [];
+          for (const input of inputs) paths.push(await filePath(transport, input, signal));
+          timestamp = new Date();
+          id = await submit("edit images", modelId, () =>
+            transport.create(
+              "ai-image-editor",
+              {
+                model: modelId as EditImageModel,
+                image_count: 1,
+                ...(resolution ? { resolution } : {}),
+                // Without one, the editor uses `auto`.
+                ...(requestedRatio
+                  ? { aspect_ratio: requestedRatio as (typeof editAspectRatios)[number] }
+                  : {}),
+                style: { prompt },
+                assets: { image_file_paths: paths },
+              },
+              signal,
+              options.headers
+            )
+          );
+        } else {
+          const aspectRatio = ratio(requestedRatio);
+          timestamp = new Date();
+          id = await submit("generate images", modelId, () =>
+            transport.create(
+              "ai-image-generator",
+              {
+                model: modelId as GenerateImageModel,
+                image_count: 1,
+                ...(resolution ? { resolution } : {}),
+                ...(aspectRatio ? { aspect_ratio: aspectRatio } : {}),
+                style: { prompt },
+              },
+              signal,
+              options.headers
+            )
+          );
+        }
         const project = await transport.wait(id, "image", signal, options.headers);
         try {
           const images = await Promise.all(
@@ -163,8 +242,6 @@ export function createMagicHour(settings: MagicHourSettings = {}): MagicHourProv
     };
   }
   function video(modelId: MagicHourVideoModelId = "default"): VideoModelV4 {
-    if (!videoModels.includes(modelId))
-      throw new NoSuchModelError({ modelId, modelType: "videoModel" });
     return {
       specificationVersion: "v4",
       provider: "magichour.video",
@@ -183,7 +260,7 @@ export function createMagicHour(settings: MagicHourSettings = {}): MagicHourProv
           throw new Error("Invalid Magic Hour video resolution.");
         if (options.resolution && extras.resolution !== undefined)
           throw new Error("Use either resolution or providerOptions.magichour.resolution.");
-        let resolution: VideoResolution = extras.resolution ?? "480p";
+        let resolution: VideoResolution | undefined = extras.resolution;
         const dimensionsRatio = ratioFromSize(options.resolution);
         if (options.resolution) {
           const shortEdge = Math.min(...dimensions(options.resolution));
@@ -224,51 +301,40 @@ export function createMagicHour(settings: MagicHourSettings = {}): MagicHourProv
         // Validate all options before uploading input or submitting a paid generation.
         const transport = client();
         const signal = transport.signal(options.abortSignal);
-        let imagePath: string | undefined;
-        if (options.image?.type === "url") imagePath = httpsURL(options.image.url);
-        else if (options.image?.type === "file") {
-          const extension = (
-            { "image/png": "png", "image/jpeg": "jpg", "image/webp": "webp" } as Record<
-              string,
-              string
-            >
-          )[options.image.mediaType];
-          if (!extension) throw new Error("Image-to-video accepts PNG, JPEG, or WebP.");
-          const bytes =
-            typeof options.image.data === "string"
-              ? base64Bytes(options.image.data)
-              : options.image.data;
-          if (!hasSignature(bytes, extension))
-            throw new Error(`The input image data isn't a ${extension.toUpperCase()} file.`);
-          imagePath = await transport.uploadImage(bytes, extension, signal);
-        }
+        const imagePath = options.image
+          ? await filePath(transport, inputImage(options.image), signal)
+          : undefined;
         const timestamp = new Date();
         const shared = {
           model: modelId,
           end_seconds: duration,
-          resolution,
+          ...(resolution ? { resolution } : {}),
           ...(options.generateAudio !== undefined ? { audio: options.generateAudio } : {}),
         };
         const id = imagePath
-          ? await transport.create(
-              "image-to-video",
-              {
-                ...shared,
-                ...(options.prompt ? { style: { prompt: options.prompt } } : {}),
-                assets: { image_file_path: imagePath },
-              },
-              signal,
-              options.headers
+          ? await submit("animate images", modelId, () =>
+              transport.create(
+                "image-to-video",
+                {
+                  ...shared,
+                  ...(options.prompt ? { style: { prompt: options.prompt } } : {}),
+                  assets: { image_file_path: imagePath },
+                },
+                signal,
+                options.headers
+              )
             )
-          : await transport.create(
-              "text-to-video",
-              {
-                ...shared,
-                style: { prompt: options.prompt ?? "" },
-                aspect_ratio: aspectRatio ?? "16:9",
-              },
-              signal,
-              options.headers
+          : await submit("generate videos", modelId, () =>
+              transport.create(
+                "text-to-video",
+                {
+                  ...shared,
+                  style: { prompt: options.prompt ?? "" },
+                  aspect_ratio: aspectRatio ?? "16:9",
+                },
+                signal,
+                options.headers
+              )
             );
         const project = await transport.wait(id, "video", signal, options.headers);
         try {

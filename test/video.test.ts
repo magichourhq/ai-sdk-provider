@@ -31,7 +31,6 @@ describe("text-to-video", () => {
     expect(api.generations()[0].body).toEqual({
       model: "default",
       end_seconds: 5,
-      resolution: "480p",
       style: { prompt: "Waves" },
       aspect_ratio: "16:9",
     });
@@ -118,7 +117,6 @@ describe("image-to-video", () => {
     expect(api.generations()[0].body).toEqual({
       model: "default",
       end_seconds: 5,
-      resolution: "480p",
       style: { prompt: "Animate" },
       assets: { image_file_path: upload.filePath },
     });

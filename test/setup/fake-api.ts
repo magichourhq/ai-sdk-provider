@@ -33,6 +33,7 @@ export type FakeApiOptions = {
 
 const kinds = {
   "/v1/ai-image-generator": "image",
+  "/v1/ai-image-editor": "image",
   "/v1/text-to-video": "video",
   "/v1/image-to-video": "video",
 } as const;

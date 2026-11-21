@@ -1,6 +1,6 @@
 import { generateImage } from "ai";
 import { describe, expect, test } from "vitest";
-import { API, fakeApi, png } from "./setup/fake-api.js";
+import { API, fakeApi, gif, png } from "./setup/fake-api.js";
 
 describe("image generation", () => {
   test("sends the default request and returns the project's output, ID and charge", async () => {
@@ -15,7 +15,6 @@ describe("image generation", () => {
     expect(api.generations()[0].body).toEqual({
       model: "default",
       image_count: 1,
-      resolution: "640px",
       style: { prompt: "A mug" },
     });
     // Polled until the project completes, then downloaded once from its signed URL.
@@ -83,13 +82,13 @@ describe("rejected image input", () => {
   test.each<[string, Record<string, unknown>]>([
     ["a blank prompt", { prompt: "   " }],
     ["a seed", { seed: 1 }],
-    ["input images to edit", { prompt: { text: "Make it blue", images: [png] } }],
+    ["a mask", { prompt: { text: "Make it blue", images: [png], mask: png } }],
     ["a size that isn't a 640, 1024 or 2048 tier", { size: "500x500" }],
     ["a size with an unsupported aspect ratio", { size: "1024x768" }],
     ["a size with trailing text", { size: "1024x1024xjunk" }],
     ["an unsupported aspect ratio", { aspectRatio: "4:3" }],
     ["a size and aspect ratio that disagree", { size: "1024x1024", aspectRatio: "16:9" }],
-    ["an unsupported resolution option", { providerOptions: { magichour: { resolution: "4k" } } }],
+    ["an unsupported resolution option", { providerOptions: { magichour: { resolution: "8k" } } }],
     [
       "both a size and a resolution option",
       { size: "1024x1024", providerOptions: { magichour: { resolution: "1k" } } },
@@ -118,6 +117,58 @@ describe("rejected image input", () => {
         providerOptions: {},
       })
     ).rejects.toThrow(/One image per request/);
+    expect(api.calls).toHaveLength(0);
+  });
+});
+
+describe("image editing", () => {
+  test("uploads input bytes, passes URLs through and sends an editor request", async () => {
+    const api = fakeApi();
+    const result = await generateImage({
+      model: api.provider().image("flux-2-klein"),
+      prompt: { text: "Make it blue", images: [png, "https://example.com/mug.jpg"] },
+      aspectRatio: "4:3",
+      maxRetries: 0,
+    });
+    expect(api.generations().map((c) => c.url)).toEqual([`${API}/v1/ai-image-editor`]);
+    expect(api.generations()[0].body).toEqual({
+      model: "flux-2-klein",
+      image_count: 1,
+      aspect_ratio: "4:3",
+      style: { prompt: "Make it blue" },
+      assets: { image_file_paths: ["api-assets/input-1", "https://example.com/mug.jpg"] },
+    });
+    expect(result.image.uint8Array).toEqual(api.projects[0].bytes);
+  });
+
+  // One model setting reaches two endpoints, so a rejection says which one refused it.
+  test("a rejection names the operation and model", async () => {
+    const api = fakeApi({ createStatus: 400 });
+    const error = generateImage({
+      model: api.provider().image("z-image-turbo"),
+      prompt: { text: "Blue", images: [png] },
+      maxRetries: 0,
+    });
+    await expect(error).rejects.toMatchObject({
+      status: 400,
+      message: "Magic Hour can't edit images with z-image-turbo: Request failed (400)",
+    });
+  });
+
+  test.each<[string, string, Record<string, unknown>]>([
+    ["more than 10 images", "default", { prompt: { text: "Blue", images: Array(11).fill(png) } }],
+    ["an aspect ratio the editor doesn't offer", "default", { aspectRatio: "21:9" }],
+    ["a bad file after a good one", "default", { prompt: { text: "Blue", images: [png, gif] } }],
+  ])("rejects %s before any request", async (_, model, options) => {
+    const api = fakeApi();
+    await expect(
+      generateImage({
+        model: api.provider().image(model as "default"),
+        prompt: { text: "Blue", images: [png] },
+        maxRetries: 0,
+        ...options,
+      })
+    ).rejects.toThrow();
     expect(api.calls).toHaveLength(0);
   });
 });

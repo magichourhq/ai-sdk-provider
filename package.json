@@ -1,6 +1,6 @@
 {
   "name": "@magichourhq/ai-sdk-provider",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "packageManager": "yarn@4.18.0",
   "description": "Magic Hour image and video provider for the AI SDK",
   "keywords": [
@@ -42,7 +42,7 @@
   },
   "dependencies": {
     "@ai-sdk/provider": "^4.0.31",
-    "@magichourhq/browser-client": "^0.3.2"
+    "@magichourhq/browser-client": "^0.3.5"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
