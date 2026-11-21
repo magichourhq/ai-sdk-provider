@@ -123,6 +123,25 @@ function ratioFromSize(size: string | undefined): AspectRatio | undefined {
   }
   throw new Error("Dimensions must have a 1:1, 16:9, or 9:16 aspect ratio.");
 }
+/**
+ * Names the operation and model in an API rejection. One model setting reaches several endpoints,
+ * so the API's own message ("model must be one of …") doesn't say which one refused it.
+ */
+async function submit(action: string, modelId: string, create: () => Promise<string>) {
+  try {
+    return await create();
+  } catch (error) {
+    if (error instanceof MagicHourError && error.status! < 500 && !error.projectId)
+      throw new MagicHourError(
+        `Magic Hour can't ${action} with ${modelId}. ${error.message}`,
+        undefined,
+        error.status,
+        undefined,
+        error.code
+      );
+    throw error;
+  }
+}
 export function createMagicHour(settings: MagicHourSettings = {}): MagicHourProvider {
   // Resolve credentials lazily so merely importing or registering the provider needs no key.
   const client = () =>
@@ -140,7 +159,8 @@ export function createMagicHour(settings: MagicHourSettings = {}): MagicHourProv
       supportsFileInputs: true,
       supportsMaskInputs: false,
       async doGenerate(options) {
-        if (!options.prompt?.trim()) throw new Error("An image prompt is required.");
+        const prompt = options.prompt;
+        if (!prompt?.trim()) throw new Error("An image prompt is required.");
         if (options.n !== 1) throw new Error("One image per request is supported.");
         if (options.mask) throw new Error("Masks are not supported.");
         const files = options.files ?? [];
@@ -161,39 +181,43 @@ export function createMagicHour(settings: MagicHourSettings = {}): MagicHourProv
         let id: string;
         let timestamp: Date;
         if (inputs.length) {
-          const paths = [];
+          const paths: string[] = [];
           for (const input of inputs) paths.push(await filePath(transport, input, signal));
           timestamp = new Date();
-          id = await transport.create(
-            "ai-image-editor",
-            {
-              model: modelId as EditImageModel,
-              image_count: 1,
-              ...(resolution ? { resolution } : {}),
-              // Without one, the editor uses `auto`.
-              ...(requestedRatio
-                ? { aspect_ratio: requestedRatio as (typeof editAspectRatios)[number] }
-                : {}),
-              style: { prompt: options.prompt },
-              assets: { image_file_paths: paths },
-            },
-            signal,
-            options.headers
+          id = await submit("edit images", modelId, () =>
+            transport.create(
+              "ai-image-editor",
+              {
+                model: modelId as EditImageModel,
+                image_count: 1,
+                ...(resolution ? { resolution } : {}),
+                // Without one, the editor uses `auto`.
+                ...(requestedRatio
+                  ? { aspect_ratio: requestedRatio as (typeof editAspectRatios)[number] }
+                  : {}),
+                style: { prompt },
+                assets: { image_file_paths: paths },
+              },
+              signal,
+              options.headers
+            )
           );
         } else {
           const aspectRatio = ratio(requestedRatio);
           timestamp = new Date();
-          id = await transport.create(
-            "ai-image-generator",
-            {
-              model: modelId as GenerateImageModel,
-              image_count: 1,
-              ...(resolution ? { resolution } : {}),
-              ...(aspectRatio ? { aspect_ratio: aspectRatio } : {}),
-              style: { prompt: options.prompt },
-            },
-            signal,
-            options.headers
+          id = await submit("generate images", modelId, () =>
+            transport.create(
+              "ai-image-generator",
+              {
+                model: modelId as GenerateImageModel,
+                image_count: 1,
+                ...(resolution ? { resolution } : {}),
+                ...(aspectRatio ? { aspect_ratio: aspectRatio } : {}),
+                style: { prompt },
+              },
+              signal,
+              options.headers
+            )
           );
         }
         const project = await transport.wait(id, "image", signal, options.headers);
@@ -288,25 +312,29 @@ export function createMagicHour(settings: MagicHourSettings = {}): MagicHourProv
           ...(options.generateAudio !== undefined ? { audio: options.generateAudio } : {}),
         };
         const id = imagePath
-          ? await transport.create(
-              "image-to-video",
-              {
-                ...shared,
-                ...(options.prompt ? { style: { prompt: options.prompt } } : {}),
-                assets: { image_file_path: imagePath },
-              },
-              signal,
-              options.headers
+          ? await submit("animate images", modelId, () =>
+              transport.create(
+                "image-to-video",
+                {
+                  ...shared,
+                  ...(options.prompt ? { style: { prompt: options.prompt } } : {}),
+                  assets: { image_file_path: imagePath },
+                },
+                signal,
+                options.headers
+              )
             )
-          : await transport.create(
-              "text-to-video",
-              {
-                ...shared,
-                style: { prompt: options.prompt ?? "" },
-                aspect_ratio: aspectRatio ?? "16:9",
-              },
-              signal,
-              options.headers
+          : await submit("generate videos", modelId, () =>
+              transport.create(
+                "text-to-video",
+                {
+                  ...shared,
+                  style: { prompt: options.prompt ?? "" },
+                  aspect_ratio: aspectRatio ?? "16:9",
+                },
+                signal,
+                options.headers
+              )
             );
         const project = await transport.wait(id, "video", signal, options.headers);
         try {

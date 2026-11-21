@@ -141,6 +141,21 @@ describe("image editing", () => {
     expect(result.image.uint8Array).toEqual(api.projects[0].bytes);
   });
 
+  // One model setting reaches two endpoints, so a rejection says which one refused it.
+  test("a rejection names the operation and model", async () => {
+    const api = fakeApi({ createStatus: 400 });
+    const error = generateImage({
+      model: api.provider().image("z-image-turbo"),
+      prompt: { text: "Blue", images: [png] },
+      maxRetries: 0,
+    });
+    await expect(error).rejects.toMatchObject({
+      status: 400,
+      message:
+        "Magic Hour can't edit images with z-image-turbo. Magic Hour API returned HTTP 400. Request failed (400)",
+    });
+  });
+
   test.each<[string, string, Record<string, unknown>]>([
     ["more than 10 images", "default", { prompt: { text: "Blue", images: Array(11).fill(png) } }],
     ["an aspect ratio the editor doesn't offer", "default", { aspectRatio: "21:9" }],
