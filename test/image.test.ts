@@ -151,8 +151,7 @@ describe("image editing", () => {
     });
     await expect(error).rejects.toMatchObject({
       status: 400,
-      message:
-        "Magic Hour can't edit images with z-image-turbo. Magic Hour API returned HTTP 400. Request failed (400)",
+      message: "Magic Hour can't edit images with z-image-turbo: Request failed (400)",
     });
   });
 

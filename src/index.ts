@@ -133,7 +133,7 @@ async function submit(action: string, modelId: string, create: () => Promise<str
   } catch (error) {
     if (error instanceof MagicHourError && error.status! < 500 && !error.projectId)
       throw new MagicHourError(
-        `Magic Hour can't ${action} with ${modelId}. ${error.message}`,
+        `Magic Hour can't ${action} with ${modelId}: ${error.message}`,
         undefined,
         error.status,
         undefined,
