@@ -1,6 +1,6 @@
 import { generateImage } from "ai";
 import { describe, expect, test } from "vitest";
-import { API, fakeApi, png } from "./setup/fake-api.js";
+import { API, fakeApi, gif, png } from "./setup/fake-api.js";
 
 describe("image generation", () => {
   test("sends the default request and returns the project's output, ID and charge", async () => {
@@ -118,6 +118,46 @@ describe("rejected image input", () => {
         providerOptions: {},
       })
     ).rejects.toThrow(/One image per request/);
+    expect(api.calls).toHaveLength(0);
+  });
+});
+
+describe("image editing", () => {
+  test("uploads input bytes, passes URLs through and sends an editor request", async () => {
+    const api = fakeApi();
+    const result = await generateImage({
+      model: api.provider().image("flux-2-klein"),
+      prompt: { text: "Make it blue", images: [png, "https://example.com/mug.jpg"] },
+      aspectRatio: "4:3",
+      maxRetries: 0,
+    });
+    expect(api.generations().map((c) => c.url)).toEqual([`${API}/v1/ai-image-editor`]);
+    expect(api.generations()[0].body).toEqual({
+      model: "flux-2-klein",
+      image_count: 1,
+      resolution: "640px",
+      aspect_ratio: "4:3",
+      style: { prompt: "Make it blue" },
+      assets: { image_file_paths: ["api-assets/input-1", "https://example.com/mug.jpg"] },
+    });
+    expect(result.image.uint8Array).toEqual(api.projects[0].bytes);
+  });
+
+  test.each<[string, string, Record<string, unknown>]>([
+    ["a model the editor doesn't offer", "z-image-turbo", {}],
+    ["more than 10 images", "default", { prompt: { text: "Blue", images: Array(11).fill(png) } }],
+    ["an aspect ratio the editor doesn't offer", "default", { aspectRatio: "21:9" }],
+    ["a bad file after a good one", "default", { prompt: { text: "Blue", images: [png, gif] } }],
+  ])("rejects %s before any request", async (_, model, options) => {
+    const api = fakeApi();
+    await expect(
+      generateImage({
+        model: api.provider().image(model as "default"),
+        prompt: { text: "Blue", images: [png] },
+        maxRetries: 0,
+        ...options,
+      })
+    ).rejects.toThrow();
     expect(api.calls).toHaveLength(0);
   });
 });
