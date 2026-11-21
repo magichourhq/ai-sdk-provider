@@ -2,6 +2,7 @@ import {
   NoSuchModelError,
   type ImageModelV4,
   type ImageModelV4CallOptions,
+  type ImageModelV4File,
   type Experimental_VideoModelV4 as VideoModelV4,
   type Experimental_VideoModelV4CallOptions as VideoModelV4CallOptions,
   type ProviderV4,
@@ -16,6 +17,9 @@ export { MagicHourError } from "@magichourhq/browser-client";
 export type MagicHourSettings = Omit<ClientSettings, "apiKey"> & { apiKey?: string };
 const imageModels = ["default", "flux-2-klein", "z-image-turbo", "qwen-image-2.1"] as const;
 const videoModels = ["default", "ltx-2.5", "minimax-h3", "wan-2.2"] as const;
+// The image models that the AI Image Editor also offers.
+const editModels = ["default", "flux-2-klein", "qwen-image-2.1"] as const;
+const editAspectRatios = ["auto", "1:1", "16:9", "9:16", "4:3", "3:2", "4:5", "2:3"] as const;
 export type MagicHourImageModelId = (typeof imageModels)[number];
 export type MagicHourVideoModelId = (typeof videoModels)[number];
 const aspectRatios = ["1:1", "16:9", "9:16"] as const;
@@ -68,6 +72,27 @@ function dimensions(value: string): [width: number, height: number] {
   if (!match) throw new Error("Dimensions must look like 1024x1024.");
   return [Number(match[1]), Number(match[2])];
 }
+type InputImage = { url: string } | { bytes: Uint8Array; extension: string };
+/** Checks an input image without uploading it, so a bad file never follows a good upload. */
+function inputImage(file: ImageModelV4File): InputImage {
+  if (file.type === "url") return { url: httpsURL(file.url) };
+  const extension = (
+    { "image/png": "png", "image/jpeg": "jpg", "image/webp": "webp" } as Record<string, string>
+  )[file.mediaType];
+  if (!extension) throw new Error("Input images must be PNG, JPEG, or WebP.");
+  const bytes = typeof file.data === "string" ? base64Bytes(file.data) : file.data;
+  if (!hasSignature(bytes, extension))
+    throw new Error(`The input image data isn't a ${extension.toUpperCase()} file.`);
+  return { bytes, extension };
+}
+async function filePath(
+  transport: MagicHourClient,
+  input: InputImage,
+  signal: AbortSignal
+): Promise<string> {
+  if ("url" in input) return input.url;
+  return transport.uploadImage(input.bytes, input.extension, signal);
+}
 function imageResolution(size: string | undefined, option: unknown): ImageResolution {
   if (option !== undefined && !isOneOf(imageResolutions, option))
     throw new Error("Image resolution must be 640px, 1k, or 2k.");
@@ -111,13 +136,16 @@ export function createMagicHour(settings: MagicHourSettings = {}): MagicHourProv
       provider: "magichour.image",
       modelId,
       maxImagesPerCall: 1,
-      supportsFileInputs: false,
+      supportsFileInputs: isOneOf(editModels, modelId),
       supportsMaskInputs: false,
       async doGenerate(options) {
         if (!options.prompt?.trim()) throw new Error("An image prompt is required.");
         if (options.n !== 1) throw new Error("One image per request is supported.");
-        if (options.files?.length || options.mask)
-          throw new Error("This provider supports image generation, not image editing.");
+        if (options.mask) throw new Error("Masks are not supported.");
+        const files = options.files ?? [];
+        if (files.length && !isOneOf(editModels, modelId))
+          throw new Error(`${modelId} can't edit images. Use default, flux-2-klein, or qwen-image-2.1.`);
+        if (files.length > 10) throw new Error("Image editing accepts up to 10 input images.");
         if (options.seed !== undefined)
           throw new Error("Magic Hour does not expose a seed parameter.");
         const extras = extra(options, ["resolution"]);
@@ -125,22 +153,50 @@ export function createMagicHour(settings: MagicHourSettings = {}): MagicHourProv
         const sizeRatio = ratioFromSize(options.size);
         if (sizeRatio && options.aspectRatio && sizeRatio !== options.aspectRatio)
           throw new Error("size and aspectRatio disagree.");
-        const aspectRatio = ratio(options.aspectRatio ?? sizeRatio);
+        const requestedRatio = options.aspectRatio ?? sizeRatio;
+        if (files.length && requestedRatio && !isOneOf(editAspectRatios, requestedRatio))
+          throw new Error(`Supported aspect ratios for editing: ${editAspectRatios.join(", ")}.`);
+        const inputs = files.map(inputImage);
         const transport = client();
         const signal = transport.signal(options.abortSignal);
-        const timestamp = new Date();
-        const id = await transport.create(
-          "ai-image-generator",
-          {
-            model: modelId,
-            image_count: 1,
-            resolution,
-            ...(aspectRatio ? { aspect_ratio: aspectRatio } : {}),
-            style: { prompt: options.prompt },
-          },
-          signal,
-          options.headers
-        );
+        let id: string;
+        let timestamp: Date;
+        if (inputs.length) {
+          const paths = [];
+          for (const input of inputs) paths.push(await filePath(transport, input, signal));
+          timestamp = new Date();
+          id = await transport.create(
+            "ai-image-editor",
+            {
+              model: modelId as (typeof editModels)[number],
+              image_count: 1,
+              resolution,
+              // Without one, the editor uses `auto`.
+              ...(requestedRatio
+                ? { aspect_ratio: requestedRatio as (typeof editAspectRatios)[number] }
+                : {}),
+              style: { prompt: options.prompt },
+              assets: { image_file_paths: paths },
+            },
+            signal,
+            options.headers
+          );
+        } else {
+          const aspectRatio = ratio(requestedRatio);
+          timestamp = new Date();
+          id = await transport.create(
+            "ai-image-generator",
+            {
+              model: modelId,
+              image_count: 1,
+              resolution,
+              ...(aspectRatio ? { aspect_ratio: aspectRatio } : {}),
+              style: { prompt: options.prompt },
+            },
+            signal,
+            options.headers
+          );
+        }
         const project = await transport.wait(id, "image", signal, options.headers);
         try {
           const images = await Promise.all(
@@ -224,24 +280,9 @@ export function createMagicHour(settings: MagicHourSettings = {}): MagicHourProv
         // Validate all options before uploading input or submitting a paid generation.
         const transport = client();
         const signal = transport.signal(options.abortSignal);
-        let imagePath: string | undefined;
-        if (options.image?.type === "url") imagePath = httpsURL(options.image.url);
-        else if (options.image?.type === "file") {
-          const extension = (
-            { "image/png": "png", "image/jpeg": "jpg", "image/webp": "webp" } as Record<
-              string,
-              string
-            >
-          )[options.image.mediaType];
-          if (!extension) throw new Error("Image-to-video accepts PNG, JPEG, or WebP.");
-          const bytes =
-            typeof options.image.data === "string"
-              ? base64Bytes(options.image.data)
-              : options.image.data;
-          if (!hasSignature(bytes, extension))
-            throw new Error(`The input image data isn't a ${extension.toUpperCase()} file.`);
-          imagePath = await transport.uploadImage(bytes, extension, signal);
-        }
+        const imagePath = options.image
+          ? await filePath(transport, inputImage(options.image), signal)
+          : undefined;
         const timestamp = new Date();
         const shared = {
           model: modelId,

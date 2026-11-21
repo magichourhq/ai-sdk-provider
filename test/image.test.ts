@@ -83,7 +83,7 @@ describe("rejected image input", () => {
   test.each<[string, Record<string, unknown>]>([
     ["a blank prompt", { prompt: "   " }],
     ["a seed", { seed: 1 }],
-    ["input images to edit", { prompt: { text: "Make it blue", images: [png] } }],
+    ["a mask", { prompt: { text: "Make it blue", images: [png], mask: png } }],
     ["a size that isn't a 640, 1024 or 2048 tier", { size: "500x500" }],
     ["a size with an unsupported aspect ratio", { size: "1024x768" }],
     ["a size with trailing text", { size: "1024x1024xjunk" }],

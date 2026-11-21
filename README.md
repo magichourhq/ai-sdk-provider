@@ -1,6 +1,6 @@
 # Magic Hour provider for the AI SDK
 
-Generate images and videos with [Magic Hour](https://magichour.ai) from the [AI SDK](https://ai-sdk.dev).
+Generate and edit images, and generate videos, with [Magic Hour](https://magichour.ai) from the [AI SDK](https://ai-sdk.dev).
 
 ## Install
 
@@ -32,6 +32,15 @@ const { video } = await generateVideo({
 
 For text-to-video, pass a string prompt. An input image can be bytes, base64 or an HTTPS URL.
 
+To edit images, pass them with the prompt. Up to 10 PNG, JPEG or WebP images:
+
+```ts
+const { image: edited } = await generateImage({
+  model: magichour.image("flux-2-klein"),
+  prompt: { text: "Make the mug matte blue", images: [image.uint8Array] },
+});
+```
+
 To configure the provider in code, use `createMagicHour`:
 
 ```ts
@@ -53,13 +62,15 @@ const magichour = createMagicHour({ apiKey: process.env.MY_KEY, timeoutMs: 300_0
 | | Image | Video |
 | --- | --- | --- |
 | Models | `default`, `flux-2-klein`, `z-image-turbo`, `qwen-image-2.1` | `default`, `ltx-2.5`, `minimax-h3`, `wan-2.2` |
+| Editing models | `default`, `flux-2-klein`, `qwen-image-2.1` | |
 | Resolution | `640px` (default), `1k`, `2k` | `360p`, `480p` (default), `720p`, `1080p`, `4k` |
-| Aspect ratio | `1:1`, `16:9`, `9:16` | `1:1`, `16:9` (default), `9:16` |
+| Aspect ratio | `1:1`, `16:9`, `9:16`; editing also takes `auto`, `4:3`, `3:2`, `4:5` and `2:3` | `1:1`, `16:9` (default), `9:16` |
 
 - Set the resolution with `providerOptions: { magichour: { resolution } }`, or with the AI SDK's `size` for images (640, 1024 or 2048 on the longest edge) and `resolution` for videos (360, 480, 720, 1080 or 2160 on the shortest edge).
 - Video `duration` is 1 to 60 seconds, 5 by default. `generateAudio` is passed through.
 - Image-to-video keeps the input image's shape, so it takes no aspect ratio.
-- Seeds, FPS, image editing and frame or reference inputs aren't supported. They throw before anything is sent.
+- Editing uses Magic Hour's AI Image Editor. Without an aspect ratio, the editor uses `auto`. Each model accepts a different number of input images; see [models](https://docs.magichour.ai/api-reference/models).
+- Seeds, FPS, masks and video frame or reference inputs aren't supported. They throw before anything is sent.
 - `default` follows Magic Hour's current recommendation, so its output and cost can change. Choose a model to keep them fixed. See [pricing](https://docs.magichour.ai/pricing).
 
 ## Credits and failures
