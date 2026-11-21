@@ -8,7 +8,8 @@ import { filePath, inputImage, submit } from "./requests.js";
 type GenerateImageModel = NonNullable<CreateBody<"ai-image-generator">["model"]>;
 type EditImageModel = NonNullable<CreateBody<"ai-image-editor">["model"]>;
 const editAspectRatios = ["auto", "1:1", "16:9", "9:16", "4:3", "3:2", "4:5", "2:3"] as const;
-export type MagicHourImageModelId = GenerateImageModel | EditImageModel;
+// Any string is allowed, so a model the API adds before the next release still works.
+export type MagicHourImageModelId = GenerateImageModel | EditImageModel | (string & {});
 
 /** Generates images, or edits them when the prompt includes input images. */
 export function imageModel(modelId: string, client: () => MagicHourClient): ImageModelV4 {

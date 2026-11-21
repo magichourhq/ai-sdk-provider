@@ -12,7 +12,11 @@ import {
 import { filePath, inputImage, submit } from "./requests.js";
 
 type VideoModel = NonNullable<CreateBody<"text-to-video">["model"]>;
-export type MagicHourVideoModelId = VideoModel | NonNullable<CreateBody<"image-to-video">["model"]>;
+// Any string is allowed, so a model the API adds before the next release still works.
+export type MagicHourVideoModelId =
+  | VideoModel
+  | NonNullable<CreateBody<"image-to-video">["model"]>
+  | (string & {});
 
 /** Generates videos from text, or from an input image. */
 export function videoModel(
@@ -81,7 +85,7 @@ export function videoModel(
         : undefined;
       const timestamp = new Date();
       const shared = {
-        model: modelId,
+        model: modelId as VideoModel,
         end_seconds: duration,
         ...(resolution ? { resolution } : {}),
         ...(options.generateAudio !== undefined ? { audio: options.generateAudio } : {}),
