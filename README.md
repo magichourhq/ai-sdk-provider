@@ -73,16 +73,34 @@ Every model in the [Magic Hour API](https://docs.magichour.ai/api-reference/mode
 - Seeds, FPS, masks and video frame or reference inputs aren't supported. They throw before anything is sent.
 - `default` follows Magic Hour's current recommendation, so its output and cost can change. Choose a model to keep them fixed. See [pricing](https://docs.magichour.ai/pricing).
 
-## Credits and failures
+## Credits and plans
 
-Every generation is a paid job. The provider submits it once, waits for it to finish and downloads the result.
+Each generation uses credits from your Magic Hour account. The cost depends on the model, the resolution and, for video, the duration. See [pricing](https://docs.magichour.ai/pricing).
 
-- **Paid requests are never retried**, by the provider or by the AI SDK. Don't wrap calls in your own retry.
-- **Once a job is accepted, every error names it.** Errors are `MagicHourError` with a `projectId`. Fetch the result with `GET /v1/image-projects/{id}` or `GET /v1/video-projects/{id}` instead of generating again. To keep the ID even if the process dies, save it in `onProjectCreated`.
-- **If a submission's outcome is unknown**, for example after a dropped connection, the error says so and has no `projectId`. Check your account history before submitting again.
+Some models and settings need a paid plan (Creator, Pro or Business). On a plan that doesn't include them, the API refuses the request.
+
+When the API refuses a request, nothing is charged. The error is a `MagicHourError` with the API's `status` and `code`, and names the operation and model. Credit and plan problems have status 402:
+
+| Code | Meaning |
+| --- | --- |
+| `insufficient_credits` | Your account doesn't have enough credits. |
+| `subscription_required` | This needs a subscription. |
+| `plan_upgrade_required` | Your plan doesn't include this model or setting. |
+
+```
+Magic Hour can't edit images with gpt-image-2: Please upgrade to creator, pro, or business to create an edit with this model
+```
+
+Each image's or video's project ID and credits charged are in `providerMetadata.magichour.images` or `providerMetadata.magichour.videos`.
+
+## Failures
+
+Because generations cost credits, the provider submits each request once, waits for it to finish and downloads the result.
+
+- **Requests are never retried**, by the provider or by the AI SDK, so a retry can't charge you twice. Don't wrap calls in your own retry.
+- **Once Magic Hour accepts a job, every error has its `projectId`.** Fetch the result with `GET /v1/image-projects/{id}` or `GET /v1/video-projects/{id}` instead of generating again. To keep the ID even if your process stops, save it in `onProjectCreated`.
+- **If it's unknown whether a submission went through**, for example after a dropped connection, the error says so and has no `projectId`. Check your account history before submitting again.
 - **Aborting stops waiting.** It doesn't cancel the job on Magic Hour.
-
-Each job's project ID and credits charged are in `providerMetadata.magichour.images` or `providerMetadata.magichour.videos`, one entry per image or video.
 
 ## Development
 
