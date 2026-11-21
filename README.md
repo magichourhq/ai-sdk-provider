@@ -71,13 +71,13 @@ Every model in the [Magic Hour API](https://docs.magichour.ai/api-reference/mode
 - Image-to-video keeps the input image's shape, so it takes no aspect ratio.
 - Editing uses Magic Hour's AI Image Editor, with any model the editor offers. Without an aspect ratio, the editor uses `auto`. Each model accepts a different number of input images.
 - Seeds, FPS, masks and video frame or reference inputs aren't supported. They throw before anything is sent.
-- `default` follows Magic Hour's current recommendation, so its output and cost can change. Choose a model to keep them fixed. See [pricing](https://docs.magichour.ai/pricing).
+- `default` follows Magic Hour's current recommendation, so its output and cost can change. Choose a model to keep them fixed. See [pricing](https://docs.magichour.ai/billing/overview).
 
 ## Credits and plans
 
-Each generation uses credits from your Magic Hour account. The cost depends on the model, the resolution and, for video, the duration. See [pricing](https://docs.magichour.ai/pricing).
+Each generation uses credits from your Magic Hour account. The cost depends on the model, the resolution and, for video, the duration. See [pricing](https://docs.magichour.ai/billing/overview).
 
-Some models and settings need a paid plan (Creator, Pro or Business). On a plan that doesn't include them, the API refuses the request.
+Some models and settings need a [paid plan](https://magichour.ai/pricing) (Creator, Pro or Business). On a plan that doesn't include them, the API refuses the request.
 
 When the API refuses a request, nothing is charged. The error is a `MagicHourError` with the API's `status` and `code`, and names the operation and model. Credit and plan problems have status 402:
 
