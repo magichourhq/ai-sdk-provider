@@ -1,4 +1,4 @@
-import { NoSuchModelError } from "@ai-sdk/provider";
+import { LoadAPIKeyError, NoSuchModelError } from "@ai-sdk/provider";
 import { createProviderRegistry, generateImage } from "ai";
 import { describe, expect, test, vi } from "vitest";
 import { createMagicHour, magichour } from "../src/index.js";
@@ -40,7 +40,7 @@ describe("API key", () => {
     vi.stubEnv("MAGIC_HOUR_API_KEY", undefined);
     const api = fakeApi();
     const model = createMagicHour({ fetch: api.fetch }).image();
-    await expect(generateImage({ model, prompt: "Mug", maxRetries: 0 })).rejects.toThrow(/API key/);
+    await expect(generateImage({ model, prompt: "Mug", maxRetries: 0 })).rejects.toThrow(LoadAPIKeyError);
     expect(api.calls).toHaveLength(0);
   });
 

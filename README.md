@@ -59,7 +59,7 @@ const magichour = createMagicHour({ apiKey: process.env.MY_KEY, timeoutMs: 300_0
 
 ## Models and options
 
-Every model in the [Magic Hour API](https://docs.magichour.ai/api-reference/models) works, for example `flux-2-klein`, `nano-banana-2.1` or `gpt-image-2` for images, and `ltx-2.5`, `kling-4.0` or `veo3.1` for video. Model IDs are typed from the API spec, so new models arrive with new releases. Each model has its own resolutions, durations, aspect ratios and plan tiers. The API checks them and rejects a request it can't run before charging anything.
+Every model in the [Magic Hour API](https://docs.magichour.ai/api-reference/models) works, for example `flux-2-klein`, `nano-banana-2.1` or `gpt-image-2` for images, and `ltx-2.5`, `kling-4.0` or `veo3.1` for video. Known model IDs come from the API spec for autocomplete, and any other ID is passed through, so a new model works before the next release. Each model has its own resolutions, durations, aspect ratios and plan tiers. The API checks them and rejects a request it can't run before charging anything.
 
 | | Image | Video |
 | --- | --- | --- |
