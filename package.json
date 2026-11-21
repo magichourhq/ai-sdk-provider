@@ -42,7 +42,7 @@
   },
   "dependencies": {
     "@ai-sdk/provider": "^4.0.31",
-    "@magichourhq/browser-client": "^0.3.2"
+    "@magichourhq/browser-client": "^0.3.3"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

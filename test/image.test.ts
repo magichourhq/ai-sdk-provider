@@ -15,7 +15,6 @@ describe("image generation", () => {
     expect(api.generations()[0].body).toEqual({
       model: "default",
       image_count: 1,
-      resolution: "640px",
       style: { prompt: "A mug" },
     });
     // Polled until the project completes, then downloaded once from its signed URL.
@@ -89,7 +88,7 @@ describe("rejected image input", () => {
     ["a size with trailing text", { size: "1024x1024xjunk" }],
     ["an unsupported aspect ratio", { aspectRatio: "4:3" }],
     ["a size and aspect ratio that disagree", { size: "1024x1024", aspectRatio: "16:9" }],
-    ["an unsupported resolution option", { providerOptions: { magichour: { resolution: "4k" } } }],
+    ["an unsupported resolution option", { providerOptions: { magichour: { resolution: "8k" } } }],
     [
       "both a size and a resolution option",
       { size: "1024x1024", providerOptions: { magichour: { resolution: "1k" } } },
@@ -135,7 +134,6 @@ describe("image editing", () => {
     expect(api.generations()[0].body).toEqual({
       model: "flux-2-klein",
       image_count: 1,
-      resolution: "640px",
       aspect_ratio: "4:3",
       style: { prompt: "Make it blue" },
       assets: { image_file_paths: ["api-assets/input-1", "https://example.com/mug.jpg"] },
@@ -144,7 +142,6 @@ describe("image editing", () => {
   });
 
   test.each<[string, string, Record<string, unknown>]>([
-    ["a model the editor doesn't offer", "z-image-turbo", {}],
     ["more than 10 images", "default", { prompt: { text: "Blue", images: Array(11).fill(png) } }],
     ["an aspect ratio the editor doesn't offer", "default", { aspectRatio: "21:9" }],
     ["a bad file after a good one", "default", { prompt: { text: "Blue", images: [png, gif] } }],

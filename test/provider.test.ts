@@ -13,11 +13,10 @@ describe("provider", () => {
     expect(() => provider.video()).not.toThrow();
   });
 
-  test("unknown models throw NoSuchModelError", () => {
+  // Image and video model IDs are checked by the API, which rejects unknown ones before charging.
+  test("language and embedding models throw NoSuchModelError", () => {
     const provider = createMagicHour({ apiKey: "test-key" });
     for (const create of [
-      () => provider.image("not-a-model" as any),
-      () => provider.video("not-a-model" as any),
       () => provider.languageModel("gpt"),
       () => provider.embeddingModel("embed"),
     ])

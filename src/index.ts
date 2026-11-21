@@ -12,19 +12,21 @@ import {
   MagicHourError,
   httpsURL,
   type ClientSettings,
+  type CreateBody,
 } from "@magichourhq/browser-client";
 export { MagicHourError } from "@magichourhq/browser-client";
 export type MagicHourSettings = Omit<ClientSettings, "apiKey"> & { apiKey?: string };
-const imageModels = ["default", "flux-2-klein", "z-image-turbo", "qwen-image-2.1"] as const;
-const videoModels = ["default", "ltx-2.5", "minimax-h3", "wan-2.2"] as const;
-// The image models that the AI Image Editor also offers.
-const editModels = ["default", "flux-2-klein", "qwen-image-2.1"] as const;
+// Model IDs come from the API spec through @magichourhq/api-types. The API checks each model's
+// own limits (resolutions, durations, plan) and rejects a bad request before it charges anything.
+type GenerateImageModel = NonNullable<CreateBody<"ai-image-generator">["model"]>;
+type EditImageModel = NonNullable<CreateBody<"ai-image-editor">["model"]>;
+type VideoModel = NonNullable<CreateBody<"text-to-video">["model"]>;
 const editAspectRatios = ["auto", "1:1", "16:9", "9:16", "4:3", "3:2", "4:5", "2:3"] as const;
-export type MagicHourImageModelId = (typeof imageModels)[number];
-export type MagicHourVideoModelId = (typeof videoModels)[number];
+export type MagicHourImageModelId = GenerateImageModel | EditImageModel;
+export type MagicHourVideoModelId = VideoModel | NonNullable<CreateBody<"image-to-video">["model"]>;
 const aspectRatios = ["1:1", "16:9", "9:16"] as const;
 type AspectRatio = (typeof aspectRatios)[number];
-const imageResolutions = ["640px", "1k", "2k"] as const;
+const imageResolutions = ["640px", "1k", "2k", "4k"] as const;
 type ImageResolution = (typeof imageResolutions)[number];
 const videoResolutions = ["360p", "480p", "720p", "1080p", "4k"] as const;
 type VideoResolution = (typeof videoResolutions)[number];
@@ -93,10 +95,10 @@ async function filePath(
   if ("url" in input) return input.url;
   return transport.uploadImage(input.bytes, input.extension, signal);
 }
-function imageResolution(size: string | undefined, option: unknown): ImageResolution {
+function imageResolution(size: string | undefined, option: unknown): ImageResolution | undefined {
   if (option !== undefined && !isOneOf(imageResolutions, option))
-    throw new Error("Image resolution must be 640px, 1k, or 2k.");
-  if (!size) return option ?? "640px";
+    throw new Error("Image resolution must be 640px, 1k, 2k, or 4k.");
+  if (!size) return option;
   if (option !== undefined)
     throw new Error("Use either size or providerOptions.magichour.resolution.");
   // Magic Hour exposes longest-edge tiers, rather than arbitrary pixel sizes.
@@ -129,22 +131,19 @@ export function createMagicHour(settings: MagicHourSettings = {}): MagicHourProv
       apiKey: settings.apiKey ?? process.env.MAGIC_HOUR_API_KEY ?? "",
     });
   function image(modelId: string = "default"): ImageModelV4 {
-    if (!isOneOf(imageModels, modelId))
-      throw new NoSuchModelError({ modelId, modelType: "imageModel" });
     return {
       specificationVersion: "v4",
       provider: "magichour.image",
       modelId,
       maxImagesPerCall: 1,
-      supportsFileInputs: isOneOf(editModels, modelId),
+      // The API rejects input images for a model that can't edit, before charging anything.
+      supportsFileInputs: true,
       supportsMaskInputs: false,
       async doGenerate(options) {
         if (!options.prompt?.trim()) throw new Error("An image prompt is required.");
         if (options.n !== 1) throw new Error("One image per request is supported.");
         if (options.mask) throw new Error("Masks are not supported.");
         const files = options.files ?? [];
-        if (files.length && !isOneOf(editModels, modelId))
-          throw new Error(`${modelId} can't edit images. Use default, flux-2-klein, or qwen-image-2.1.`);
         if (files.length > 10) throw new Error("Image editing accepts up to 10 input images.");
         if (options.seed !== undefined)
           throw new Error("Magic Hour does not expose a seed parameter.");
@@ -168,9 +167,9 @@ export function createMagicHour(settings: MagicHourSettings = {}): MagicHourProv
           id = await transport.create(
             "ai-image-editor",
             {
-              model: modelId as (typeof editModels)[number],
+              model: modelId as EditImageModel,
               image_count: 1,
-              resolution,
+              ...(resolution ? { resolution } : {}),
               // Without one, the editor uses `auto`.
               ...(requestedRatio
                 ? { aspect_ratio: requestedRatio as (typeof editAspectRatios)[number] }
@@ -187,9 +186,9 @@ export function createMagicHour(settings: MagicHourSettings = {}): MagicHourProv
           id = await transport.create(
             "ai-image-generator",
             {
-              model: modelId,
+              model: modelId as GenerateImageModel,
               image_count: 1,
-              resolution,
+              ...(resolution ? { resolution } : {}),
               ...(aspectRatio ? { aspect_ratio: aspectRatio } : {}),
               style: { prompt: options.prompt },
             },
@@ -219,8 +218,6 @@ export function createMagicHour(settings: MagicHourSettings = {}): MagicHourProv
     };
   }
   function video(modelId: MagicHourVideoModelId = "default"): VideoModelV4 {
-    if (!videoModels.includes(modelId))
-      throw new NoSuchModelError({ modelId, modelType: "videoModel" });
     return {
       specificationVersion: "v4",
       provider: "magichour.video",
@@ -239,7 +236,7 @@ export function createMagicHour(settings: MagicHourSettings = {}): MagicHourProv
           throw new Error("Invalid Magic Hour video resolution.");
         if (options.resolution && extras.resolution !== undefined)
           throw new Error("Use either resolution or providerOptions.magichour.resolution.");
-        let resolution: VideoResolution = extras.resolution ?? "480p";
+        let resolution: VideoResolution | undefined = extras.resolution;
         const dimensionsRatio = ratioFromSize(options.resolution);
         if (options.resolution) {
           const shortEdge = Math.min(...dimensions(options.resolution));
@@ -287,7 +284,7 @@ export function createMagicHour(settings: MagicHourSettings = {}): MagicHourProv
         const shared = {
           model: modelId,
           end_seconds: duration,
-          resolution,
+          ...(resolution ? { resolution } : {}),
           ...(options.generateAudio !== undefined ? { audio: options.generateAudio } : {}),
         };
         const id = imagePath

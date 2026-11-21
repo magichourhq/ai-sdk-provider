@@ -59,17 +59,17 @@ const magichour = createMagicHour({ apiKey: process.env.MY_KEY, timeoutMs: 300_0
 
 ## Models and options
 
+Every model in the [Magic Hour API](https://docs.magichour.ai/api-reference/models) works, for example `flux-2-klein`, `nano-banana-2.1` or `gpt-image-2` for images, and `ltx-2.5`, `kling-4.0` or `veo3.1` for video. Model IDs are typed from the API spec, so new models arrive with new releases. Each model has its own resolutions, durations, aspect ratios and plan tiers. The API checks them and rejects a request it can't run before charging anything.
+
 | | Image | Video |
 | --- | --- | --- |
-| Models | `default`, `flux-2-klein`, `z-image-turbo`, `qwen-image-2.1` | `default`, `ltx-2.5`, `minimax-h3`, `wan-2.2` |
-| Editing models | `default`, `flux-2-klein`, `qwen-image-2.1` | |
-| Resolution | `640px` (default), `1k`, `2k` | `360p`, `480p` (default), `720p`, `1080p`, `4k` |
+| Resolution | `640px`, `1k`, `2k`, `4k` | `360p`, `480p`, `720p`, `1080p`, `4k` |
 | Aspect ratio | `1:1`, `16:9`, `9:16`; editing also takes `auto`, `4:3`, `3:2`, `4:5` and `2:3` | `1:1`, `16:9` (default), `9:16` |
 
-- Set the resolution with `providerOptions: { magichour: { resolution } }`, or with the AI SDK's `size` for images (640, 1024 or 2048 on the longest edge) and `resolution` for videos (360, 480, 720, 1080 or 2160 on the shortest edge).
-- Video `duration` is 1 to 60 seconds, 5 by default. `generateAudio` is passed through.
+- Without a resolution, the API picks the model's default. Set one with `providerOptions: { magichour: { resolution } }`, or with the AI SDK's `size` for images (640, 1024 or 2048 on the longest edge) and `resolution` for videos (360, 480, 720, 1080 or 2160 on the shortest edge).
+- Video `duration` is 5 seconds by default. Some models only take certain durations; Kling 2.6, for example, takes 5 or 10. `generateAudio` is passed through.
 - Image-to-video keeps the input image's shape, so it takes no aspect ratio.
-- Editing uses Magic Hour's AI Image Editor. Without an aspect ratio, the editor uses `auto`. Each model accepts a different number of input images; see [models](https://docs.magichour.ai/api-reference/models).
+- Editing uses Magic Hour's AI Image Editor, with any model the editor offers. Without an aspect ratio, the editor uses `auto`. Each model accepts a different number of input images.
 - Seeds, FPS, masks and video frame or reference inputs aren't supported. They throw before anything is sent.
 - `default` follows Magic Hour's current recommendation, so its output and cost can change. Choose a model to keep them fixed. See [pricing](https://docs.magichour.ai/pricing).
 
