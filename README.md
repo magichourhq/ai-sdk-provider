@@ -87,6 +87,8 @@ When the API refuses a request, nothing is charged. The error is a `MagicHourErr
 | `subscription_required` | This needs a subscription. |
 | `plan_upgrade_required` | Your plan doesn't include this model or setting. |
 
+For `insufficient_credits`, `error.creditShortfall` contains the missing credit amount when the API provides it.
+
 ```
 Magic Hour can't edit images with gpt-image-2: Please upgrade to creator, pro, or business to create an edit with this model
 ```
