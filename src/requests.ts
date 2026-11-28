@@ -1,22 +1,39 @@
 import type { ImageModelV4File } from "@ai-sdk/provider";
-import type { EstimateImageListParams, EstimateImageListResponse } from "@magichourhq/api-types";
+import type {
+  EstimateAudioListResponse,
+  EstimateImageListResponse,
+  EstimateVideoListResponse,
+} from "@magichourhq/api-types";
 import { MagicHourClient, MagicHourError, httpsURL } from "@magichourhq/browser-client";
 
-export async function estimateImage(
-  params: EstimateImageListParams,
+const estimateFields = {
+  image: ["tool", "model", "resolution", "image_count", "scale_factor", "mode"],
+  video: ["tool", "end_seconds", "start_seconds", "model", "resolution", "audio", "has_video_reference"],
+  audio: ["tool", "character_count", "duration"],
+} as const;
+
+type EstimateType = keyof typeof estimateFields;
+
+export function isEstimateType(type: string): type is EstimateType {
+  return Object.hasOwn(estimateFields, type);
+}
+
+export async function estimateCredits(
+  type: EstimateType,
+  params: Record<string, unknown>,
   apiKey: string,
   request: typeof fetch,
   signal: AbortSignal
-): Promise<EstimateImageListResponse> {
+): Promise<EstimateImageListResponse | EstimateVideoListResponse | EstimateAudioListResponse> {
   const query = new URLSearchParams();
-  for (const name of ["tool", "model", "resolution", "image_count", "scale_factor", "mode"] as const) {
+  for (const name of estimateFields[type]) {
     const value = params[name];
     if (value !== undefined) query.set(name, String(value));
   }
   signal.throwIfAborted();
   let response: Response;
   try {
-    response = await request(`https://api.magichour.ai/v1/estimate/image?${query}`, {
+    response = await request(`https://api.magichour.ai/v1/estimate/${type}?${query}`, {
       method: "GET",
       headers: { Authorization: `Bearer ${apiKey}`, Accept: "application/json" },
       redirect: "error",
@@ -24,12 +41,12 @@ export async function estimateImage(
     });
   } catch {
     signal.throwIfAborted();
-    throw new MagicHourError("Magic Hour image estimate request failed.");
+    throw new MagicHourError(`Magic Hour ${type} estimate request failed.`);
   }
   if (!response.ok) {
     const error = await response.json().catch(() => null);
     throw new MagicHourError(
-      error?.message || `Magic Hour image estimate failed (HTTP ${response.status}).`,
+      error?.message || `Magic Hour ${type} estimate failed (HTTP ${response.status}).`,
       undefined,
       response.status,
       undefined,

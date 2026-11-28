@@ -87,7 +87,7 @@ describe("estimate", () => {
     const fetch = vi.fn<typeof globalThis.fetch>();
     const provider = createMagicHour({ apiKey: "test-key", fetch });
     // @ts-expect-error JavaScript callers can pass unsupported types at runtime.
-    await expect(provider.estimate("video", params)).rejects.toThrow("Unsupported estimate type: video");
+    await expect(provider.estimate("other", params)).rejects.toThrow("Unsupported estimate type: other");
     expect(fetch).not.toHaveBeenCalled();
   });
 

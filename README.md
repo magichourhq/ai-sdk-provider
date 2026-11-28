@@ -75,7 +75,7 @@ Every model in the [Magic Hour API](https://docs.magichour.ai/api-reference/mode
 
 ## Credits and plans
 
-Use `estimate("image", params)` to price an image request before generating. The API currently supports image estimates.
+Use `estimate(type, params)` to price an image, video, or audio request before generating.
 
 ```ts
 import { magichour } from "@magichourhq/ai-sdk-provider";
@@ -87,6 +87,18 @@ const { estimated_credits } = await magichour.estimate("image", {
   image_count: 4,
 });
 console.log(estimated_credits);
+
+const video = await magichour.estimate("video", {
+  tool: "image-to-video",
+  end_seconds: 5,
+});
+console.log(video.estimated_credits);
+
+const audio = await magichour.estimate("audio", {
+  tool: "ai-voice-generator",
+  character_count: 120,
+});
+console.log(audio.estimated_credits);
 ```
 
 Estimates use your API key and do not spend credits or check your balance or plan eligibility.
