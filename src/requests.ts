@@ -56,7 +56,8 @@ export async function submit(action: string, modelId: string, create: () => Prom
         error.status,
         undefined,
         error.code,
-        error.creditShortfall
+        error.creditShortfall,
+        error
       );
     throw error;
   }
