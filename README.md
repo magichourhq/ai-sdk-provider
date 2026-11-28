@@ -75,6 +75,19 @@ Every model in the [Magic Hour API](https://docs.magichour.ai/api-reference/mode
 
 ## Credits and plans
 
+Use `estimateImage` to price an image request before generating:
+
+```ts
+const { estimated_credits } = await magichour.estimateImage({
+  tool: "ai-image-generator",
+  model: "nano-banana-2.1",
+  resolution: "2k",
+  image_count: 4,
+});
+```
+
+Estimates use your API key and do not spend credits or check your balance or plan eligibility.
+
 Each generation uses credits from your Magic Hour account. The cost depends on the model, the resolution and, for video, the duration. See [pricing](https://docs.magichour.ai/billing/overview).
 
 Some models and settings need a [paid plan](https://magichour.ai/pricing) (Creator, Pro or Business). On a plan that doesn't include them, the API refuses the request.

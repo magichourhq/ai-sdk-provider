@@ -331,6 +331,7 @@ __metadata:
   resolution: "@magichourhq/ai-sdk-provider@workspace:."
   dependencies:
     "@ai-sdk/provider": "npm:^4.0.31"
+    "@magichourhq/api-types": "npm:0.2.0"
     "@magichourhq/browser-client": "npm:^0.3.9"
     "@types/node": "npm:^24.0.0"
     "@vitest/coverage-v8": "npm:^5.1.0"
