@@ -62,7 +62,7 @@ describe("API key", () => {
   });
 });
 
-describe("estimateImage", () => {
+describe("estimate", () => {
   const params = { tool: "ai-image-generator" } as const;
 
   test("returns the estimate and sends only supported query fields", async () => {
@@ -72,7 +72,7 @@ describe("estimateImage", () => {
     const provider = createMagicHour({ apiKey: " test-key ", fetch });
     const request = { ...params, model: "nano-banana-2.1", image_count: 4, prompt: "Mug" };
 
-    await expect(provider.estimateImage(request)).resolves.toEqual({ estimated_credits: 12 });
+    await expect(provider.estimate("image", request)).resolves.toEqual({ estimated_credits: 12 });
     expect(fetch).toHaveBeenCalledExactlyOnceWith(
       "https://api.magichour.ai/v1/estimate/image?tool=ai-image-generator&model=nano-banana-2.1&image_count=4",
       expect.objectContaining({
@@ -81,6 +81,14 @@ describe("estimateImage", () => {
         redirect: "error",
       })
     );
+  });
+
+  test("rejects an unsupported type before sending a request", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>();
+    const provider = createMagicHour({ apiKey: "test-key", fetch });
+    // @ts-expect-error JavaScript callers can pass unsupported types at runtime.
+    await expect(provider.estimate("video", params)).rejects.toThrow("Unsupported estimate type: video");
+    expect(fetch).not.toHaveBeenCalled();
   });
 
   test.each([
@@ -95,20 +103,20 @@ describe("estimateImage", () => {
   ])("reports an HTTP $error.status error", async ({ response, error }) => {
     const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValueOnce(response);
     const provider = createMagicHour({ apiKey: "test-key", fetch });
-    await expect(provider.estimateImage(params)).rejects.toMatchObject(error);
+    await expect(provider.estimate("image", params)).rejects.toMatchObject(error);
   });
 
   test("wraps a network failure in MagicHourError", async () => {
     const fetch = vi.fn<typeof globalThis.fetch>().mockRejectedValueOnce(new TypeError("fetch failed"));
     const provider = createMagicHour({ apiKey: "test-key", fetch });
-    await expect(provider.estimateImage(params)).rejects.toThrow(MagicHourError);
+    await expect(provider.estimate("image", params)).rejects.toThrow(MagicHourError);
   });
 
   test("an already-aborted estimate sends no request", async () => {
     const fetch = vi.fn<typeof globalThis.fetch>();
     const provider = createMagicHour({ apiKey: "test-key", fetch });
     const abortSignal = AbortSignal.abort();
-    await expect(provider.estimateImage(params, { abortSignal })).rejects.toMatchObject({ name: "AbortError" });
+    await expect(provider.estimate("image", params, { abortSignal })).rejects.toMatchObject({ name: "AbortError" });
     expect(fetch).not.toHaveBeenCalled();
   });
 });
