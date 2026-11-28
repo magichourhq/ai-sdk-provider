@@ -5,16 +5,31 @@ import {
   type Experimental_VideoModelV4 as VideoModelV4,
   type ProviderV4,
 } from "@ai-sdk/provider";
-import type { EstimateImageListParams, EstimateImageListResponse } from "@magichourhq/api-types";
+import type {
+  EstimateAudioListParams,
+  EstimateAudioListResponse,
+  EstimateImageListParams,
+  EstimateImageListResponse,
+  EstimateVideoListParams,
+  EstimateVideoListResponse,
+} from "@magichourhq/api-types";
 import { MagicHourClient, type ClientSettings } from "@magichourhq/browser-client";
 import { imageModel, type MagicHourImageModelId } from "./image.js";
-import { estimateImage } from "./requests.js";
+import { estimateCredits, isEstimateType } from "./requests.js";
 import { videoModel, type MagicHourVideoModelId } from "./video.js";
 export { MagicHourError } from "@magichourhq/browser-client";
-export type { EstimateImageListParams, EstimateImageListResponse } from "@magichourhq/api-types";
+export type {
+  EstimateAudioListParams,
+  EstimateAudioListResponse,
+  EstimateImageListParams,
+  EstimateImageListResponse,
+  EstimateVideoListParams,
+  EstimateVideoListResponse,
+} from "@magichourhq/api-types";
 export type { MagicHourImageModelId } from "./image.js";
 export type { MagicHourVideoModelId } from "./video.js";
 export type MagicHourSettings = Omit<ClientSettings, "apiKey"> & { apiKey?: string };
+type EstimateOptions = { abortSignal?: AbortSignal };
 export interface MagicHourProvider extends Omit<ProviderV4, "imageModel"> {
   image(modelId?: MagicHourImageModelId): ImageModelV4;
   imageModel(modelId?: MagicHourImageModelId): ImageModelV4;
@@ -23,8 +38,10 @@ export interface MagicHourProvider extends Omit<ProviderV4, "imageModel"> {
   estimate(
     type: "image",
     params: EstimateImageListParams,
-    options?: { abortSignal?: AbortSignal }
+    options?: EstimateOptions
   ): Promise<EstimateImageListResponse>;
+  estimate(type: "video", params: EstimateVideoListParams, options?: EstimateOptions): Promise<EstimateVideoListResponse>;
+  estimate(type: "audio", params: EstimateAudioListParams, options?: EstimateOptions): Promise<EstimateAudioListResponse>;
 }
 export function createMagicHour(settings: MagicHourSettings = {}): MagicHourProvider {
   // Resolve credentials lazily so merely importing or registering the provider needs no key.
@@ -52,11 +69,15 @@ export function createMagicHour(settings: MagicHourSettings = {}): MagicHourProv
     imageModel: image,
     video,
     videoModel: video,
-    async estimate(type, params, options) {
-      if (type !== "image") throw new TypeError(`Unsupported estimate type: ${type}`);
+    async estimate(
+      type: string,
+      params: EstimateAudioListParams | EstimateImageListParams | EstimateVideoListParams,
+      options?: EstimateOptions
+    ) {
+      if (!isEstimateType(type)) throw new TypeError(`Unsupported estimate type: ${type}`);
       const key = apiKey();
       const signal = client(key).signal(options?.abortSignal);
-      return estimateImage(params, key, settings.fetch ?? fetch, signal);
+      return estimateCredits(type, params, key, settings.fetch ?? fetch, signal);
     },
     languageModel(modelId: string): never {
       throw new NoSuchModelError({ modelId, modelType: "languageModel" });
