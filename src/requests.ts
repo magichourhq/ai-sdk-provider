@@ -1,5 +1,43 @@
 import type { ImageModelV4File } from "@ai-sdk/provider";
+import type { EstimateImageListParams, EstimateImageListResponse } from "@magichourhq/api-types";
 import { MagicHourClient, MagicHourError, httpsURL } from "@magichourhq/browser-client";
+
+export async function estimateImage(
+  params: EstimateImageListParams,
+  apiKey: string,
+  request: typeof fetch,
+  signal: AbortSignal
+): Promise<EstimateImageListResponse> {
+  const query = new URLSearchParams();
+  for (const name of ["tool", "model", "resolution", "image_count", "scale_factor", "mode"] as const) {
+    const value = params[name];
+    if (value !== undefined) query.set(name, String(value));
+  }
+  signal.throwIfAborted();
+  let response: Response;
+  try {
+    response = await request(`https://api.magichour.ai/v1/estimate/image?${query}`, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${apiKey}`, Accept: "application/json" },
+      redirect: "error",
+      signal,
+    });
+  } catch {
+    signal.throwIfAborted();
+    throw new MagicHourError("Magic Hour image estimate request failed.");
+  }
+  if (!response.ok) {
+    const error = await response.json().catch(() => null);
+    throw new MagicHourError(
+      error?.message || `Magic Hour image estimate failed (HTTP ${response.status}).`,
+      undefined,
+      response.status,
+      undefined,
+      error?.code
+    );
+  }
+  return response.json();
+}
 
 // Input images and paid submissions: everything that sends something to Magic Hour.
 function ascii(text: string): number[] {
