@@ -20,7 +20,8 @@ export interface MagicHourProvider extends Omit<ProviderV4, "imageModel"> {
   imageModel(modelId?: MagicHourImageModelId): ImageModelV4;
   video(modelId?: MagicHourVideoModelId): VideoModelV4;
   videoModel(modelId?: MagicHourVideoModelId): VideoModelV4;
-  estimateImage(
+  estimate(
+    type: "image",
     params: EstimateImageListParams,
     options?: { abortSignal?: AbortSignal }
   ): Promise<EstimateImageListResponse>;
@@ -51,7 +52,8 @@ export function createMagicHour(settings: MagicHourSettings = {}): MagicHourProv
     imageModel: image,
     video,
     videoModel: video,
-    async estimateImage(params, options) {
+    async estimate(type, params, options) {
+      if (type !== "image") throw new TypeError(`Unsupported estimate type: ${type}`);
       const key = apiKey();
       const signal = client(key).signal(options?.abortSignal);
       return estimateImage(params, key, settings.fetch ?? fetch, signal);
