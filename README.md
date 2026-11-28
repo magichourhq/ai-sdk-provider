@@ -75,18 +75,15 @@ Every model in the [Magic Hour API](https://docs.magichour.ai/api-reference/mode
 
 ## Credits and plans
 
-Use `estimate("image", params)` to price an image request before generating. The API currently supports image estimates.
+Use `estimateImage` to price an image request before generating:
 
 ```ts
-import { magichour } from "@magichourhq/ai-sdk-provider";
-
-const { estimated_credits } = await magichour.estimate("image", {
+const { estimated_credits } = await magichour.estimateImage({
   tool: "ai-image-generator",
   model: "nano-banana-2.1",
   resolution: "2k",
   image_count: 4,
 });
-console.log(estimated_credits);
 ```
 
 Estimates use your API key and do not spend credits or check your balance or plan eligibility.
