@@ -1,7 +1,7 @@
 import { LoadAPIKeyError, NoSuchModelError } from "@ai-sdk/provider";
 import { createProviderRegistry, generateImage } from "ai";
 import { describe, expect, test, vi } from "vitest";
-import { createMagicHour, magichour } from "../src/index.js";
+import { createMagicHour, MagicHourError, magichour } from "../src/index.js";
 import { fakeApi } from "./setup/fake-api.js";
 
 describe("provider", () => {
@@ -59,5 +59,56 @@ describe("API key", () => {
     const model = api.provider({ apiKey: "explicit-key" }).image();
     await generateImage({ model, prompt: "Mug", maxRetries: 0 });
     expect(api.generations()[0].headers.get("Authorization")).toBe("Bearer explicit-key");
+  });
+});
+
+describe("estimateImage", () => {
+  const params = { tool: "ai-image-generator" } as const;
+
+  test("returns the estimate and sends only supported query fields", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValueOnce(
+      Response.json({ estimated_credits: 12 })
+    );
+    const provider = createMagicHour({ apiKey: " test-key ", fetch });
+    const request = { ...params, model: "nano-banana-2.1", image_count: 4, prompt: "Mug" };
+
+    await expect(provider.estimateImage(request)).resolves.toEqual({ estimated_credits: 12 });
+    expect(fetch).toHaveBeenCalledExactlyOnceWith(
+      "https://api.magichour.ai/v1/estimate/image?tool=ai-image-generator&model=nano-banana-2.1&image_count=4",
+      expect.objectContaining({
+        method: "GET",
+        headers: { Authorization: "Bearer test-key", Accept: "application/json" },
+        redirect: "error",
+      })
+    );
+  });
+
+  test.each([
+    {
+      response: Response.json({ message: "Invalid model", code: "invalid_model" }, { status: 400 }),
+      error: { message: "Invalid model", status: 400, code: "invalid_model" },
+    },
+    {
+      response: new Response("Bad Gateway", { status: 502 }),
+      error: { message: "Magic Hour image estimate failed (HTTP 502).", status: 502 },
+    },
+  ])("reports an HTTP $error.status error", async ({ response, error }) => {
+    const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValueOnce(response);
+    const provider = createMagicHour({ apiKey: "test-key", fetch });
+    await expect(provider.estimateImage(params)).rejects.toMatchObject(error);
+  });
+
+  test("wraps a network failure in MagicHourError", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>().mockRejectedValueOnce(new TypeError("fetch failed"));
+    const provider = createMagicHour({ apiKey: "test-key", fetch });
+    await expect(provider.estimateImage(params)).rejects.toThrow(MagicHourError);
+  });
+
+  test("an already-aborted estimate sends no request", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>();
+    const provider = createMagicHour({ apiKey: "test-key", fetch });
+    const abortSignal = AbortSignal.abort();
+    await expect(provider.estimateImage(params, { abortSignal })).rejects.toMatchObject({ name: "AbortError" });
+    expect(fetch).not.toHaveBeenCalled();
   });
 });
